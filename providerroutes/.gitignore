@@ -1,0 +1,5 @@
+# v4.3 (2026-05-01): copy synced from aikey-cli/data/provider_fingerprint.yaml
+# at build time (each consumer's `make sync-fingerprint`, or release.sh's
+# Step 0.5). The canonical source of truth lives in aikey-cli; editing the
+# copy here is a build-step concern, not a code change.
+data/provider_fingerprint.yaml
