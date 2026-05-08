@@ -6,13 +6,15 @@ import (
 	"testing"
 )
 
+// 2026-05-08 Kimi 双平台拆分: api.kimi.com / api.moonshot.cn 拆为两个独立
+// provider_code (kimi_code / moonshot),不再是同一 provider 下两 host。
 const minimalYAML = `
 provider_routes:
-  - { host: "api.anthropic.com", protocol: anthropic,         provider: anthropic, base_url: "https://api.anthropic.com",       version: "/v1" }
-  - { host: "api.openai.com",    protocol: openai_compatible, provider: openai,    base_url: "https://api.openai.com",          version: "/v1" }
-  - { host: "api.kimi.com",      protocol: openai_compatible, provider: kimi,      base_url: "https://api.kimi.com/coding",     version: "/v1" }
-  - { host: "api.moonshot.cn",   protocol: openai_compatible, provider: kimi,      base_url: "https://api.moonshot.cn",         version: "/v1" }
-  - { host: "api.perplexity.ai", protocol: openai_compatible, provider: perplexity, base_url: "https://api.perplexity.ai",      version: "" }
+  - { host: "api.anthropic.com", protocol: anthropic,         provider: anthropic,  base_url: "https://api.anthropic.com",       version: "/v1" }
+  - { host: "api.openai.com",    protocol: openai_compatible, provider: openai,     base_url: "https://api.openai.com",          version: "/v1" }
+  - { host: "api.kimi.com",      protocol: openai_compatible, provider: kimi_code,  base_url: "https://api.kimi.com/coding",     version: "/v1" }
+  - { host: "api.moonshot.cn",   protocol: openai_compatible, provider: moonshot,   base_url: "https://api.moonshot.cn",         version: "/v1" }
+  - { host: "api.perplexity.ai", protocol: openai_compatible, provider: perplexity, base_url: "https://api.perplexity.ai",       version: "" }
   - { host: "generativelanguage.googleapis.com", protocol: gemini, provider: google_gemini, base_url: "https://generativelanguage.googleapis.com", version: "/v1beta" }
 `
 
@@ -54,21 +56,32 @@ func TestByHostCaseInsensitive(t *testing.T) {
 			t.Errorf("ByHost(%q) returned !ok", h)
 			continue
 		}
-		if r.Provider != "kimi" {
-			t.Errorf("ByHost(%q).Provider = %q, want kimi", h, r.Provider)
+		if r.Provider != "kimi_code" {
+			t.Errorf("ByHost(%q).Provider = %q, want kimi_code", h, r.Provider)
 		}
 	}
 }
 
-func TestByProviderFirstWins(t *testing.T) {
+// 2026-05-08 Kimi 双平台拆分: api.kimi.com → kimi_code,api.moonshot.cn → moonshot,
+// 两个独立 provider_code,各自只有一行,不再有 first-match-wins 的隐性 bug。
+func TestByProviderKimiCodeAndMoonshot(t *testing.T) {
 	tbl := mustParse(t, minimalYAML)
-	r, ok := tbl.ByProvider("kimi")
-	if !ok {
-		t.Fatal("ByProvider(kimi) returned !ok")
+	cases := []struct {
+		provider string
+		wantHost string
+	}{
+		{"kimi_code", "api.kimi.com"},
+		{"moonshot", "api.moonshot.cn"},
 	}
-	// kimi appears twice — yaml-first row is api.kimi.com (Kimi Coding).
-	if r.Host != "api.kimi.com" {
-		t.Errorf("ByProvider(kimi).Host = %q, want api.kimi.com (yaml-first)", r.Host)
+	for _, c := range cases {
+		r, ok := tbl.ByProvider(c.provider)
+		if !ok {
+			t.Errorf("ByProvider(%q) returned !ok", c.provider)
+			continue
+		}
+		if r.Host != c.wantHost {
+			t.Errorf("ByProvider(%q).Host = %q, want %q", c.provider, r.Host, c.wantHost)
+		}
 	}
 }
 
