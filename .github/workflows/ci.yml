@@ -1,0 +1,38 @@
+# CI gate — runs unit tests on every push and PR.
+# Project rule: 持续交付 = CI/CD 失败即失败. A non-zero exit blocks the PR.
+#
+# pkg is a MULTI-MODULE repo: each shared library (usagehash, secretobf,
+# aikeytime, providerroutes, buildinfo, aikeycompat) is its own Go module.
+# The matrix tests each independently; fail-fast: false so one module's
+# failure still reports the others. These libs are billing- and
+# security-sensitive (usagehash, secretobf), so the gate matters.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [usagehash, secretobf, aikeytime, providerroutes, buildinfo, aikeycompat]
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./... -count=1
