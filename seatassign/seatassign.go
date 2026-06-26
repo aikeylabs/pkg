@@ -1,5 +1,5 @@
 // Package seatassign is the SINGLE SOURCE OF TRUTH for mapping a seat to its
-// preferred order of provider accounts within a seat_group (weighted rendezvous
+// preferred order of provider accounts within a oauth_group (weighted rendezvous
 // / HRW hashing).
 //
 // Why a shared module (not duplicated in master + proxy): the master computes a
@@ -37,7 +37,7 @@ import (
 // Account is one provider account a seat can be assigned to within a group.
 type Account struct {
 	// AccountID is the stable identity hashed for ranking
-	// (seat_group_account.account_id). MUST be stable across master & proxy.
+	// (oauth_group_account.account_id). MUST be stable across master & proxy.
 	AccountID string
 	// Weight is the WRH capacity weight; <= 0 is treated as 1. A higher weight
 	// proportionally attracts more seats (for accounts with larger quota).
