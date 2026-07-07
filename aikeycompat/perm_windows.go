@@ -71,6 +71,11 @@ func EnforceOwnerOnly(path string) error {
 func runIcacls(path string, args ...string) error {
 	full := append([]string{path}, args...)
 	cmd := exec.Command("icacls", full...)
+	// icacls is a console app; without this every EnforceOwnerOnly call from
+	// a console-less parent (aikey-proxy startup / WAL init — 5+ call sites)
+	// flashes a terminal window on the user's desktop. Same class as the
+	// 2026-07-07 web-bridge window-flash bug; see HideSpawnConsole docs.
+	HideSpawnConsole(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("icacls %v: %w (output: %s)", args, err, string(out))
