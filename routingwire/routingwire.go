@@ -34,8 +34,9 @@ type RoutingResponse struct {
 //   - AccountID != ""            → the engine's sticky binding (proxy applies it
 //     when the account is still a valid, usable candidate; else local pick).
 //   - Blocked == true            → the engine left this (seat,group) UNBOUND
-//     because every pool account is at the per-account user cap — the proxy MUST
-//     429 and never fall back to the cap-blind local pick.
+//     (every pool account is at the per-account user cap, or no account may take
+//     a binding at all). The proxy MUST 429 and never fall back to the cap-blind
+//     local pick.
 //
 // AccountID == "" with Blocked == false is not emitted.
 type RouteEntry struct {
