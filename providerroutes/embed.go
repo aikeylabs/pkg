@@ -1,7 +1,9 @@
 package providerroutes
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"sync"
 )
 
@@ -14,9 +16,12 @@ import (
 //     `make build`)
 //   - workflow/CD/publish/release.sh `Step 0.5: sync provider_fingerprint`
 //
-// The file is gitignored at this location: the canonical source lives in
-// aikey-cli/data/. Editing the copy here is wrong; subsequent syncs will
-// overwrite it.
+// P1c / design D-7: this copy is CHECKED IN (no longer gitignored) so every
+// Go consumer reading pkg/providerroutes via go.mod replace gets a present,
+// correct file without a per-service sync step. The canonical source lives in
+// aikey-cli/data/; editing this copy directly is wrong — sync-fingerprint
+// regenerates it and TestFingerprintSHA256_SourceEqualsBuildCopy fails the
+// build if the two diverge (the drift gate).
 //
 //go:embed data/provider_fingerprint.yaml
 var embeddedYAML []byte
@@ -51,4 +56,15 @@ func EmbeddedYAML() []byte {
 	out := make([]byte, len(embeddedYAML))
 	copy(out, embeddedYAML)
 	return out
+}
+
+// Digest returns the first 12 hex chars of SHA256(embedded yaml) — the
+// registry provenance stamp ("mapping comes from registry vX"). Used by the
+// proxy's read-only diagnostics endpoint (task 7.9) and the four-surface
+// visibility (3.5) so the client can prove WHICH embedded registry is live.
+// Since the yaml is compiled in, the digest changes only when the binary does
+// (P7.14: editing a mapping line = source change = a new digest = a re-release).
+func Digest() string {
+	sum := sha256.Sum256(embeddedYAML)
+	return hex.EncodeToString(sum[:])[:12]
 }

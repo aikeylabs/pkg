@@ -76,7 +76,13 @@ func (t *Table) Stitch(req *http.Request, vaultBaseURL string) error {
 // path with empty version when not (degraded mode).
 func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, version string) {
 	host = strings.ToLower(host)
-	if r, ok := t.ByHost(host); ok {
+	// P1b (design D-2b): key by (host, path_prefix). The stored base_url's
+	// path segment (parsedPath) selects among a host's rows via
+	// segment-aligned longest-prefix match. Single-row hosts (all pre-P1b
+	// rows have path_prefix "") behave exactly as the old ByHost exact
+	// match. Fail-loud on miss is deferred to P1j (D-17); here the degraded
+	// literal-prepend fallback below is retained unchanged.
+	if r, ok := t.Lookup(host, parsedPath); ok {
 		// Use the table's base_url path (canonical), discarding what the
 		// user had stored. This is what makes the stitch deterministic
 		// across users with different vault states (some stored the URL

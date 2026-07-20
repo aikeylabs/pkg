@@ -1,0 +1,368 @@
+# Provider Fingerprint Registry (POC)
+#
+# 用途：对已抽取的 secret token 做 provider 软性分类 + 二次校验 + 上游路由/模型映射真相源
+# Why YAML：单一真相源、跨语言（Rust serde / Go yaml.v3）共读的声明式配置。
+#   🔴 勘误（2026-07-18）：本文件**编译期内嵌**（Rust include_str! / Go go:embed），
+#   **不是** ControlPanel 下发热更。改任一行 = 改源码 = 重编译四消费方 = 走完整发版
+#   （round +1，Stage 4-6 重跑）。runtime override + 签名校验是 B8（Rust doc 自陈 v1.1+），本期不做。
+#   🔴 本文件随二进制分发给所有客户，是**公开的厂商事实表** —— 🚫 严禁写入任何 secret / key /
+#   base_url_override / 客户数据（越级反例：用第 1 级安全换第 8 级实现）。
+#
+# tier 含义：
+#   confirmed  —— 前缀极具特异性，FP 几乎为 0（sk-ant-api03 / AKIA / gsk_ 等）
+#   likely     —— 前缀有特征但可能与别的 provider 共享（sk-or-v1 OpenRouter vs sk-or 其他）
+#   ambiguous  —— 无特异前缀，需要 URL / title 上下文辅助（Kimi/DeepSeek 共享 sk-）
+#   warn       —— 形态像 credential 但大概率不是（UUID / pure hex 短串）
+#
+# 来源：
+#   - Anthropic 官方文档 + GitGuardian detector
+#   - GitHub odomojuli/regextokens 仓库
+#   - 各 provider 官方 quickstart (openai.com / groq.com / x.ai / etc.)
+#   - 2026-04 web 检索
+
+version: 1
+
+# v4.1 Stage 10+: family → 官方登录/API Key 页面 URL 清单
+#
+# UI "Open login page" 按钮消费此字段,window.open() 跳到 provider 登录态。
+#
+# URL 选择原则:
+#   - OAuth-capable provider (aikey auth login 支持的 3 家) → 站点根登录页
+#   - 其他 provider → 常用的 "API Key 管理" 页面(用户看完教程能直接申请 key)
+#
+# 数据来源(2026-04 校对):
+#   - Anthropic: https://claude.ai/login (Claude Pro/Team OAuth 登录首页)
+#   - OpenAI / Codex: https://chatgpt.com (ChatGPT 登录后会流转到 OAuth 授权)
+#   - Kimi / Moonshot: https://www.kimi.com (Moonshot 账号登录)
+#   - Google Gemini: https://aistudio.google.com/app/apikey (AI Studio 的 API Key 页面)
+#   - Groq: https://console.groq.com/login
+#   - DeepSeek: https://platform.deepseek.com/sign_in
+#   - xAI: https://console.x.ai
+#   - Zhipu/BigModel: https://bigmodel.cn/login
+#   - Doubao (Volcengine Ark): https://console.volcengine.com/ark
+#   - Qwen/Tongyi (Alibaba DashScope): https://dashscope.console.aliyun.com/apiKey
+#   - SiliconFlow: https://cloud.siliconflow.cn/
+#   - Hugging Face: https://huggingface.co/login
+#   - Perplexity: https://www.perplexity.ai
+#   - OpenRouter (聚合网关): https://openrouter.ai/sign-in
+#   - Yunwu (云雾,聚合网关): https://yunwu.ai
+#   - 0011 (Zeroeleven,聚合网关): https://0011.ai
+family_login_urls:
+  anthropic:     "https://claude.ai/login"
+  openai:        "https://chatgpt.com"
+  kimi:          "https://www.kimi.com"
+  google_gemini: "https://aistudio.google.com/app/apikey"
+  groq:          "https://console.groq.com/login"
+  deepseek:      "https://platform.deepseek.com/sign_in"
+  xai_grok:      "https://console.x.ai"
+  zhipu:         "https://bigmodel.cn/login"
+  doubao:        "https://console.volcengine.com/ark"
+  qwen:          "https://dashscope.console.aliyun.com/apiKey"
+  siliconflow:   "https://cloud.siliconflow.cn"
+  huggingface:   "https://huggingface.co/login"
+  perplexity:    "https://www.perplexity.ai"
+  openrouter:    "https://openrouter.ai/sign-in"
+  yunwu:         "https://yunwu.ai"
+  zeroeleven:    "https://0011.ai"
+
+# v4.3 (2026-05-01) · provider_routes: per-host upstream routing table.
+#
+# 用途: 用一张声明式表代替原 family_base_urls + host_to_base_url 两层映射 +
+# proxy applyBaseURL 的 tail-overlap dedup 算法。每行 = 一个 host 的完整路由
+# 声明; 新加 gateway 加一行,不动代码。
+#
+# 字段语义:
+#   host       URL host portion (用户粘贴 / vault 存储 base_url 抽出的 host)
+#   protocol   匹配 aikey-proxy provider registry 的 protocol 名 (anthropic /
+#              openai_compatible / gemini),决定 RewriteRequest 实现
+#   provider   canonical provider_code (写入 vault.entries.provider_code,
+#              CLI / UI / DB 一致使用; 同 provider 可有多 host 行,如 kimi
+#              下 api.kimi.com 与 api.moonshot.cn 都是 provider=kimi)
+#   base_url   上游 root URL (host + 任何 path prefix BEFORE version,不含 version)
+#   version    API version path 段,proxy 会显式 append; 部分 provider 无 version
+#              (perplexity 直接 /chat/completions),写空字符串
+#
+# proxy 拼接规则 (一条数学规则):
+#   final_url = base_url + version + (request_path 剥掉 leading version 后的部分)
+# 客户端可能带 /v1 (kimi-cli / anthropic SDK), 也可能不带 (OpenAI SDK 把 /v1
+# 当作 base_url 的一部分自己 append) —— 都被 strip 一次后由 proxy 显式补回,
+# 拼出去重唯一的 upstream URL。无 if/else 特例。
+#
+# Web import "use official" 按钮:
+#   user 粘贴 URL → 抽 host → lookup → official URL = base_url + version
+#
+# 数据来源 (2026-05-01 校对; 2026-05-08 Kimi 双平台拆分修订):
+#   - Anthropic:   官方 https://api.anthropic.com/v1
+#   - OpenAI:      官方 https://api.openai.com/v1
+#   - Kimi Code:   https://api.kimi.com/coding/v1 (sk-kimi-* KEY 形态稳定 → confirmed regex)
+#   - Moonshot:    https://api.moonshot.cn/v1 (无稳定前缀,只能靠 URL/keyword 兜底;
+#                  与 Kimi Code 同 family=kimi 但 provider_code 已拆为独立的 moonshot)
+#   - DeepSeek / Groq / xAI / OpenRouter / Perplexity / Gemini / Zhipu /
+#     Doubao / Qwen / SiliconFlow / HuggingFace / Yunwu / Zeroeleven 同上游
+#     官方文档,详见各 provider 主页。
+provider_routes:
+  - { host: "api.anthropic.com",                  protocol: anthropic,         provider: anthropic,     base_url: "https://api.anthropic.com",                  version: "/v1"     }
+  - { host: "api.openai.com",                     protocol: openai_compatible, provider: openai,        base_url: "https://api.openai.com",                     version: "/v1"     }
+  - { host: "api.kimi.com",                       protocol: openai_compatible, provider: kimi_code,     base_url: "https://api.kimi.com/coding",                version: "/v1"     }
+  - { host: "www.kimi.com",                       protocol: openai_compatible, provider: kimi_code,     base_url: "https://api.kimi.com/coding",                version: "/v1"     }
+  - { host: "api.moonshot.cn",                    protocol: openai_compatible, provider: moonshot,      base_url: "https://api.moonshot.cn",                    version: "/v1"     }
+  - { host: "platform.moonshot.cn",               protocol: openai_compatible, provider: moonshot,      base_url: "https://api.moonshot.cn",                    version: "/v1"     }
+  - { host: "api.deepseek.com",                   protocol: openai_compatible, provider: deepseek,      base_url: "https://api.deepseek.com",                   version: "/v1"     }
+  - { host: "api.groq.com",                       protocol: openai_compatible, provider: groq,          base_url: "https://api.groq.com/openai",                version: "/v1"     }
+  - { host: "api.x.ai",                           protocol: openai_compatible, provider: xai_grok,      base_url: "https://api.x.ai",                           version: "/v1"     }
+  - { host: "openrouter.ai",                      protocol: openai_compatible, provider: openrouter,    base_url: "https://openrouter.ai/api",                  version: "/v1"     }
+  - { host: "api.perplexity.ai",                  protocol: openai_compatible, provider: perplexity,    base_url: "https://api.perplexity.ai",                  version: ""        }
+  - { host: "generativelanguage.googleapis.com",  protocol: gemini,            provider: google_gemini, base_url: "https://generativelanguage.googleapis.com",  version: "/v1beta" }
+  # zhipu / GLM (open.bigmodel.cn) 一 host 三协议端点 —— P1b/D-2b 扩键 (host, path_prefix)。
+  # 兜底行 path_prefix:"" 保持既有 openai_compatible + /api/paas 语义不变（向后兼容，18 行零改动围栏锁定）。
+  # 另两行显式 path_prefix，让客户粘贴的 /api/anthropic 与 /api/coding/paas/v4 端点各自命中正确协议/base_url。
+  - { host: "open.bigmodel.cn",                   protocol: openai_compatible, provider: zhipu,         base_url: "https://open.bigmodel.cn/api/paas",          version: ""       }
+  - { host: "open.bigmodel.cn", path_prefix: "/api/anthropic",       protocol: anthropic,         provider: zhipu, base_url: "https://open.bigmodel.cn/api/anthropic",       version: "/v1" }
+  - { host: "open.bigmodel.cn", path_prefix: "/api/coding/paas/v4",  protocol: openai_compatible, provider: zhipu, base_url: "https://open.bigmodel.cn/api/coding/paas",  version: "/v4" }
+  - { host: "ark.cn-beijing.volces.com",          protocol: openai_compatible, provider: doubao,        base_url: "https://ark.cn-beijing.volces.com/api",      version: "/v3"     }
+  - { host: "dashscope.aliyuncs.com",             protocol: openai_compatible, provider: qwen,          base_url: "https://dashscope.aliyuncs.com/compatible-mode", version: "/v1" }
+  - { host: "api.siliconflow.cn",                 protocol: openai_compatible, provider: siliconflow,   base_url: "https://api.siliconflow.cn",                 version: "/v1"     }
+  - { host: "api-inference.huggingface.co",       protocol: openai_compatible, provider: huggingface,   base_url: "https://api-inference.huggingface.co",       version: "/v1"     }
+  - { host: "yunwu.ai",                           protocol: openai_compatible, provider: yunwu,         base_url: "https://yunwu.ai",                           version: "/v1"     }
+  - { host: "aicoding.2233.ai",                   protocol: openai_compatible, provider: zeroeleven,    base_url: "https://aicoding.2233.ai",                   version: "/v1"     }
+
+# v4.1 Stage 5+: 聚合网关 family 清单 (UI Provider 字段 multi-select 设计驱动)
+#
+# 含义:这些 family 同时支持多种底层 API 协议 (例如 0011/zeroeleven 同时挂 anthropic + openai),
+# 因此 fingerprint 推断不出"严格协议类型",`protocol_types` 字段输出 `[]` 而非 `[family]`,
+# 让 UI multi-select 由用户手选实际启用的协议。
+#
+# 派生规则 (FingerprintClassifier::protocol_types_for_family):
+#   family ∈ aggregator_families  → []        (UI 让用户手选)
+#   其他 family (官方厂商)         → [family]  (单元素)
+aggregator_families:
+  - openrouter
+  - yunwu        # 云雾 yunwu.ai
+  - zeroeleven   # 0011.ai
+
+# ── provider_model_maps (P1 / design D-2): per-provider-CODE 模型名映射 ──────────
+#
+# 解 R-A：让「客户端固定用某模型名、上游真实模型名不同」的接入无需改客户端即可打通。
+# 键 = provider CODE（对齐 provider_routes.provider），故独立成 code-keyed 段：
+#   - 🚫 不挂 provider_routes 行（一 provider 多端点行会重复 = 分裂真相源，禁止 #13）
+#   - 🚫 不挂 classifier `providers` 段（那段按 classifier id 键控，非 provider code）
+#   仿 family_login_urls 的 per-key map 先例。查表：路由行定出 provider → ModelMapFor(provider)。
+#
+# match ∈ { 字面 client id "claude-opus-4-8" | 角色 opus/sonnet/haiku/fable | 通配 "*" }
+# 匹配序（精确 > 角色 > 通配，歧义不猜，design D-3）；requested_model = 上游真实模型名。
+# unmatched ∈ { reject（异模型上游默认）| passthrough（官方同名） }。
+# 构建期校验（ValidateModelMaps）：规则歧义 → MODEL_MAPPING_AMBIGUOUS；字面 claude-* 须 is_claude_safe；
+#   🚫 任何 secret 形态字符串。
+provider_model_maps:
+  - provider: zhipu
+    unmatched: reject
+    models:
+      # 角色键控：Claude 升版本（4-8→4-9）映射不失效，且不触发发版（design D-3）
+      - { match: "opus",   requested_model: "glm-4.6" }
+      - { match: "sonnet", requested_model: "glm-4.5" }
+      - { match: "haiku",  requested_model: "glm-4.5-air" }
+      # 字面精确：需要钉具体版本时用（精确优先于角色）
+      - { match: "claude-opus-4-8", requested_model: "glm-4.6" }
+
+providers:
+  # ============ Tier: confirmed（前缀高特异性，直接打上provider标签） ============
+
+  - id: anthropic_api
+    display: "Anthropic Claude (API key)"
+    # 2024 Q4 起 Claude key 可能为 60-130 字符尾段，取宽容范围
+    regex: '^sk-ant-api03-[A-Za-z0-9_\-]{40,150}$'
+    length_range: [53, 165]
+    tier: confirmed
+
+  - id: anthropic_oauth
+    display: "Anthropic Claude (OAuth setup token)"
+    regex: '^sk-ant-oat01-[A-Za-z0-9_\-]{20,}$'
+    tier: confirmed
+
+  - id: openai_project
+    display: "OpenAI (Project key)"
+    regex: '^sk-proj-[A-Za-z0-9_\-]{40,200}$'
+    length_range: [50, 210]
+    tier: confirmed
+
+  - id: openai_admin
+    display: "OpenAI (Admin key)"
+    regex: '^sk-admin-[A-Za-z0-9_\-]{100,150}$'
+    tier: confirmed
+
+  - id: openai_svcacct
+    display: "OpenAI (Service Account)"
+    regex: '^sk-svcacct-[A-Za-z0-9_\-]+$'
+    tier: confirmed
+
+  - id: openrouter
+    display: "OpenRouter"
+    # 真实 key 是 64 hex，但允许更宽字符集以兼容未来格式变化 + 合成样本
+    regex: '^sk-or-v1-[A-Za-z0-9]{50,80}$'
+    length_range: [59, 90]
+    tier: confirmed
+
+  - id: google_gemini
+    display: "Google Gemini / Google Cloud API"
+    regex: '^AIza[0-9A-Za-z_\-]{35}$'
+    length_range: [39, 39]
+    tier: confirmed
+
+  - id: groq
+    display: "Groq"
+    regex: '^gsk_[A-Za-z0-9]{48,64}$'
+    length_range: [52, 68]
+    tier: confirmed
+
+  - id: xai_grok
+    display: "xAI Grok"
+    regex: '^xai-[A-Za-z0-9]{60,100}$'
+    length_range: [64, 104]
+    tier: confirmed
+
+  - id: github_classic
+    display: "GitHub (Classic PAT)"
+    regex: '^ghp_[a-zA-Z0-9]{36}$'
+    length_range: [40, 40]
+    tier: confirmed
+
+  - id: github_fine_grained
+    display: "GitHub (Fine-grained PAT)"
+    regex: '^github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}$'
+    length_range: [93, 93]
+    tier: confirmed
+
+  - id: aws_access_key
+    display: "AWS Access Key ID"
+    regex: '^AKIA[0-9A-Z]{16}$'
+    length_range: [20, 20]
+    tier: confirmed
+
+  - id: stripe_live
+    display: "Stripe (Live Secret Key)"
+    regex: '^sk_live_[0-9a-zA-Z]{24}$'
+    length_range: [32, 32]
+    tier: confirmed
+
+  - id: stripe_restricted
+    display: "Stripe (Restricted Key)"
+    regex: '^rk_live_[0-9a-zA-Z]{99}$'
+    length_range: [107, 107]
+    tier: confirmed
+
+  - id: sendgrid
+    display: "SendGrid"
+    # 真实 key: SG.{22}.{43} 共 69；合成样本允许更宽长度
+    regex: '^SG\.[A-Za-z0-9_\-]{10,30}\.[A-Za-z0-9_\-]{20,60}$'
+    length_range: [34, 94]
+    tier: confirmed
+
+  - id: slack_bot
+    display: "Slack Bot Token"
+    regex: '^xoxb-[0-9]+-[0-9]+-[0-9a-zA-Z]+$'
+    tier: confirmed
+
+  - id: slack_user
+    display: "Slack User Token"
+    regex: '^xoxp-[0-9]+-[0-9]+-[0-9]+-[0-9a-zA-Z]+$'
+    tier: confirmed
+
+  - id: huggingface
+    display: "Hugging Face"
+    regex: '^hf_[A-Za-z]{30,40}$'
+    length_range: [33, 45]
+    tier: confirmed
+
+  - id: perplexity
+    display: "Perplexity AI"
+    regex: '^pplx-[A-Za-z0-9]{40,}$'
+    tier: confirmed
+
+  - id: generic_jwt
+    display: "JWT (generic, multiple providers)"
+    regex: '^eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$'
+    tier: confirmed
+
+  - id: pem_block
+    display: "PEM private key block (SSH / TLS / PGP)"
+    regex: '^-----BEGIN [A-Z ]+-----[\s\S]+-----END [A-Z ]+-----$'
+    tier: confirmed
+
+  # 2026-05-08 Kimi 双平台拆分：sk-kimi-* 前缀稳定且独占 → confirmed tier。
+  # Why 必须在 generic_sk 之前：Rust regex crate 不支持 lookahead，无法在 generic_sk
+  # 写 `^sk-(?!kimi-)...`；first-match-wins YAML 顺序保证 sk-kimi-* key 走精确分支，
+  # 其余 sk-* key 落到 generic_sk ambiguous bucket（Moonshot / DeepSeek / yunwu 等）。
+  - id: kimi_code
+    display: "Kimi Code (api.kimi.com)"
+    regex: '^sk-kimi-[A-Za-z0-9_\-]{20,}$'
+    tier: confirmed
+
+  # ============ Tier: ambiguous（sk- 通用前缀，需上下文补强） ============
+
+  - id: zhipu_glm
+    display: "Zhipu AI / GLM (BigModel)"
+    # 两段 id.secret 格式
+    regex: '^[A-Za-z0-9]{20,}\.[A-Za-z0-9]{20,}$'
+    tier: ambiguous
+    hint: "Zhipu 格式为 {id}.{secret}，但其他 provider 也可能使用 dot-separated"
+    # M3 新增
+    siblings:
+      - zhipu_glm
+      - bigmodel
+      - generic_other
+
+  - id: generic_sk
+    display: "Generic sk- key (Kimi / DeepSeek / 云雾 / 0011 / Mistral 等)"
+    regex: '^sk-[A-Za-z0-9]{40,80}$'
+    length_range: [43, 83]
+    tier: ambiguous
+    hint: "通用 sk- 前缀，需结合同文档 URL/title 判定具体 provider"
+    # v4.1 family rename: 'moonshot_kimi' → 'kimi' 与 connectivity/runtime PROVIDER_DEFAULTS 字典对齐
+    # (CLI 其他地方一律叫 'kimi';UI Provider 字段直接消费此值,避免名词分裂)
+    # 2026-05-08 Kimi 双平台拆分: provider_code 'kimi' 拆为 'moonshot' + 'kimi_code'
+    #   - sk-kimi-* 前缀已被前置 confirmed 规则吃掉(id=kimi_code),不会到这里。
+    #   - 落到 generic_sk 的 sk-* key 默认归 'moonshot'(用户决策 #4);URL host 强证据
+    #     可下钻到 kimi_code(api.kimi.com / www.kimi.com)。
+    disambiguators:
+      - url_domain: "platform.moonshot.cn"
+        suggest: "moonshot"
+      - url_domain: "api.moonshot.cn"
+        suggest: "moonshot"
+      - url_domain: "platform.moonshot.ai"
+        suggest: "moonshot"
+      - url_domain: "api.kimi.com"
+        suggest: "kimi_code"
+      - url_domain: "www.kimi.com"
+        suggest: "kimi_code"
+      - url_domain: "platform.deepseek.com"
+        suggest: "deepseek"
+      - url_domain: "yunwu.ai"
+        suggest: "yunwu"
+      - url_domain: "0011.ai"
+        suggest: "zeroeleven"
+    # M3 新增：URL 消歧失败时，UI 手选下拉优先展示的候选 provider id
+    siblings:
+      - moonshot
+      - kimi_code
+      - deepseek
+      - yunwu
+      - zeroeleven
+      - mistral
+      - siliconflow
+      - generic_other
+
+  # ============ Tier: warn（形态可疑，UI 需标警示） ============
+
+  - id: uuid
+    display: "UUID (通常不是 API KEY)"
+    regex: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    length_range: [36, 36]
+    tier: warn
+    hint: "看起来像 UUID（订单号/会话ID/资源标识），用户需确认是否为凭证"
+
+  - id: short_hex_raw
+    display: "Short raw hex（可能是 file hash / 版本号 / 资源 ID）"
+    regex: '^[a-fA-F0-9]{16,27}$'
+    length_range: [16, 27]
+    tier: warn
+    hint: "短 hex 串，可能是 commit hash / file hash / 资源 ID，请确认"
