@@ -41,21 +41,46 @@ const (
 	UnmatchedPassthrough = "passthrough"
 )
 
-// knownRoles are the role families a `match` may name. Kept in sync with the
-// Claude Desktop family menu (opus/sonnet/haiku/fable).
-var knownRoles = map[string]struct{}{
-	"opus": {}, "sonnet": {}, "haiku": {}, "fable": {},
-}
+// rolesInMatchOrder is the role families a `match` may name, in a FIXED
+// iteration order (Claude Desktop family menu: opus/sonnet/haiku/fable). The
+// order is load-bearing: when two role tokens co-occur in one id (e.g.
+// "claude-opus-haiku-1"), roleOfModel returns the first match in THIS order —
+// deterministic, unlike Go's randomized map iteration. Single source of truth
+// for knownRoles below. Mirrors Rust KNOWN_ROLES.
+var rolesInMatchOrder = []string{"opus", "sonnet", "haiku", "fable"}
+
+// knownRoles is the set form of rolesInMatchOrder for O(1) membership tests
+// (isRoleToken / ResolveModel role loop). Derived from the ordered slice so the
+// two never drift.
+var knownRoles = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(rolesInMatchOrder))
+	for _, r := range rolesInMatchOrder {
+		m[r] = struct{}{}
+	}
+	return m
+}()
 
 // roleOfModel extracts the role family from a claude-style model id, e.g.
-// "claude-opus-4-8" → "opus". Returns "" when no known role token is present.
+// "claude-opus-4-8" → "opus". Returns "" when no known role token is present as
+// a segment-aligned token.
+//
+// Segment-aligned ONLY — the role must be a whole "-"-delimited token: exact
+// ("opus"), prefix ("opus-…"), suffix ("…-opus"), or infix ("…-opus-…"). A
+// loose strings.Contains(lower, "-"+role) fallback used to live here; it made
+// the anchored clauses dead code and mis-classified ids like "claude-haikuish-1"
+// as haiku. Removed — feeds ResolveModel → wrong upstream model otherwise.
+//
+// Case-folding parity: Go strings.ToLower (Unicode) and Rust to_ascii_lowercase
+// agree on the claude-id charset (ASCII a–z / 0–9 / '-'). They diverge only on
+// non-ASCII code points (Kelvin sign, Turkish dotted-I, etc.), none of which
+// appear in a claude model id — no residual behavioral difference on real ids.
 func roleOfModel(model string) string {
 	lower := strings.ToLower(model)
-	for role := range knownRoles {
-		// segment-aligned: "claude-opus-4-8" contains "-opus-" or "opus" token
-		if lower == role || strings.Contains(lower, "-"+role+"-") ||
-			strings.HasPrefix(lower, role+"-") || strings.HasSuffix(lower, "-"+role) ||
-			strings.Contains(lower, "-"+role) {
+	for _, role := range rolesInMatchOrder {
+		if lower == role ||
+			strings.HasPrefix(lower, role+"-") ||
+			strings.HasSuffix(lower, "-"+role) ||
+			strings.Contains(lower, "-"+role+"-") {
 			return role
 		}
 	}

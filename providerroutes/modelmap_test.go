@@ -35,6 +35,76 @@ func TestResolveModelPrecedence(t *testing.T) {
 	}
 }
 
+// TestRoleOfModelAnchored is the unit-level resolve-parity fence for the role
+// extractor. Mirror of the Rust `role_of_model_anchored` test — the two must
+// agree token-for-token. Covers every anchored position, case-folding,
+// deterministic co-occurrence, and the NEGATIVE the old loose Contains missed.
+func TestRoleOfModelAnchored(t *testing.T) {
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"claude-opus-4-8", "opus"},     // infix  "-opus-"
+		{"opus-4", "opus"},              // prefix "opus-"
+		{"claude-4-haiku", "haiku"},     // suffix "-haiku"
+		{"sonnet", "sonnet"},            // exact token
+		{"CLAUDE-OPUS-4-8", "opus"},     // ASCII case-fold parity
+		{"claude-opus-haiku-1", "opus"}, // co-occurrence → first in rolesInMatchOrder
+		{"gpt-4o", ""},                  // no role token
+		// NEGATIVE: the removed loose Contains(lower,"-haiku") would have
+		// mis-matched this (it contains "-haiku" but not a "-haiku-" token).
+		{"claude-haikuish-1", ""},
+	}
+	for _, c := range cases {
+		if got := roleOfModel(c.id); got != c.want {
+			t.Errorf("roleOfModel(%q) = %q, want %q", c.id, got, c.want)
+		}
+	}
+}
+
+// TestResolveModelAnchoredRoles is the resolve-level (not just parse-level)
+// parity fence. Hand-vectors here are mirrored 1:1 in the Rust
+// `resolve_model_anchored_roles` test against the SAME yaml. Uses a no-wildcard
+// reject map so the NEGATIVE surfaces as unmatched instead of being swallowed
+// by "*". A shared golden of (provider,requested)->(effective,matched,policy)
+// is deferred as a follow-up: Rust resolve_model does not currently return the
+// policy (only (effective, matched)), so a policy-carrying golden would require
+// widening the Rust signature — out of scope for this fix.
+func TestResolveModelAnchoredRoles(t *testing.T) {
+	src := `
+provider_model_maps:
+  - provider: zhipu
+    unmatched: reject
+    models:
+      - { match: "opus",   requested_model: "glm-4.6" }
+      - { match: "sonnet", requested_model: "glm-4.5" }
+      - { match: "haiku",  requested_model: "glm-4.5-air" }
+      - { match: "fable",  requested_model: "glm-4-flash" }
+      - { match: "claude-opus-4-8", requested_model: "glm-4.6-pinned" }
+`
+	tbl := mustParse(t, src)
+	cases := []struct {
+		requested string
+		want      string
+		matched   bool
+	}{
+		{"claude-opus-4-8", "glm-4.6-pinned", true}, // exact beats role
+		{"claude-opus-4-9", "glm-4.6", true},        // anchored infix "-opus-"
+		{"haiku-4-5", "glm-4.5-air", true},          // anchored prefix "haiku-"
+		{"claude-4-fable", "glm-4-flash", true},     // anchored suffix "-fable"
+		{"sonnet", "glm-4.5", true},                 // exact token role
+		{"claude-opus-haiku-1", "glm-4.6", true},    // co-occurrence → opus (deterministic)
+		// NEGATIVE: no wildcard + anchored role → genuine miss (reject policy).
+		{"claude-haikuish-1", "claude-haikuish-1", false},
+	}
+	for _, c := range cases {
+		got, matched, _ := tbl.ResolveModel("zhipu", c.requested)
+		if got != c.want || matched != c.matched {
+			t.Errorf("ResolveModel(zhipu,%q) = (%q,%v), want (%q,%v)", c.requested, got, matched, c.want, c.matched)
+		}
+	}
+}
+
 func TestResolveModelUnmatchedPolicy(t *testing.T) {
 	// no-wildcard map → reject policy surfaces on miss
 	src := `
