@@ -1,5 +1,8 @@
-# v4.3 (2026-05-01): copy synced from aikey-cli/data/provider_fingerprint.yaml
-# at build time (each consumer's `make sync-fingerprint`, or release.sh's
-# Step 0.5). The canonical source of truth lives in aikey-cli; editing the
-# copy here is a build-step concern, not a code change.
-data/provider_fingerprint.yaml
+# P1c / design D-7 (2026-07-18): the build-time copy is now CHECKED IN, not
+# gitignored. Rationale: DevOps 铁律「禁止把生成产物 gitignore」vs a synced copy
+# is a real conflict — resolved to (a) checked-in + drift gate, NOT a
+# 折中平均. The drift gate is TestFingerprintSHA256_SourceEqualsBuildCopy
+# (parity_test.go), which fails the build if this copy diverges from the
+# canonical aikey-cli/data source. `make sync-fingerprint` regenerates it.
+#
+# (Intentionally empty of the old `data/provider_fingerprint.yaml` rule.)

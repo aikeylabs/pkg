@@ -19,42 +19,70 @@ type Route struct {
 	Provider string `yaml:"provider" json:"provider"`
 	BaseURL  string `yaml:"base_url" json:"base_url"`
 	Version  string `yaml:"version" json:"version"`
+	// PathPrefix (P1b / design D-2b) is the second half of the row key.
+	// A host may now carry multiple rows distinguished by the path prefix
+	// of the stored base_url (e.g. GLM's open.bigmodel.cn has separate
+	// /api/anthropic and /api/coding/paas/v4 endpoints). Lookup does a
+	// segment-aligned longest-prefix match on this field. Default "" is
+	// the host's fallback row — with all-empty prefixes the longest-prefix
+	// match degrades to exact host match, so the pre-P1b 18 rows keep
+	// identical behaviour. omitempty keeps the JSON re-emission (rules
+	// endpoint) backward compatible for the web consumer.
+	PathPrefix string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
 }
 
 // Table is an indexed read-only view of the parsed provider_routes rows.
-// Build via Parse; lookup via ByHost / ByProvider.
+// Build via Parse; lookup via Lookup (host+path) / ByHost / ByProvider.
 type Table struct {
 	rows       []Route
-	byHost     map[string]Route // host (lowercased) → row
-	firstByPro map[string]Route // provider → first row matching (insertion order)
+	byHost     map[string][]Route  // host (lowercased) → rows (yaml order)
+	firstByPro map[string]Route    // provider → first row matching (insertion order)
+	modelMaps  map[string]ModelMap // provider code (lowercased) → model_map (design D-2)
 }
 
 // Parse reads the yaml bytes (the full provider_fingerprint.yaml content)
 // and returns a Table covering the `provider_routes` section. Other yaml
 // keys are ignored. Returns an error if the bytes don't decode as yaml or
-// if a row violates basic invariants (empty host, duplicate host).
+// if a row violates basic invariants (empty host, duplicate (host,
+// path_prefix) key).
 func Parse(yamlBytes []byte) (*Table, error) {
 	var raw struct {
-		ProviderRoutes []Route `yaml:"provider_routes"`
+		ProviderRoutes    []Route    `yaml:"provider_routes"`
+		ProviderModelMaps []ModelMap `yaml:"provider_model_maps"`
 	}
 	if err := yaml.Unmarshal(yamlBytes, &raw); err != nil {
 		return nil, fmt.Errorf("providerroutes: yaml unmarshal: %w", err)
 	}
 	t := &Table{
 		rows:       make([]Route, 0, len(raw.ProviderRoutes)),
-		byHost:     make(map[string]Route, len(raw.ProviderRoutes)),
+		byHost:     make(map[string][]Route, len(raw.ProviderRoutes)),
 		firstByPro: make(map[string]Route),
+		modelMaps:  make(map[string]ModelMap, len(raw.ProviderModelMaps)),
 	}
+	for _, mm := range raw.ProviderModelMaps {
+		if mm.Provider == "" {
+			return nil, fmt.Errorf("providerroutes: provider_model_maps entry has empty provider")
+		}
+		code := strings.ToLower(mm.Provider)
+		if _, dup := t.modelMaps[code]; dup {
+			return nil, fmt.Errorf("providerroutes: duplicate provider_model_maps for %q", code)
+		}
+		t.modelMaps[code] = mm
+	}
+	// dedup key is now (host, path_prefix), not host alone (design D-2b).
+	seenKey := make(map[string]struct{}, len(raw.ProviderRoutes))
 	for i, r := range raw.ProviderRoutes {
 		if r.Host == "" {
 			return nil, fmt.Errorf("providerroutes: row %d has empty host", i)
 		}
 		host := strings.ToLower(r.Host)
 		r.Host = host
-		if _, dup := t.byHost[host]; dup {
-			return nil, fmt.Errorf("providerroutes: duplicate host %q at row %d", host, i)
+		key := host + "\x00" + r.PathPrefix
+		if _, dup := seenKey[key]; dup {
+			return nil, fmt.Errorf("providerroutes: duplicate (host,path_prefix) key %q/%q at row %d", host, r.PathPrefix, i)
 		}
-		t.byHost[host] = r
+		seenKey[key] = struct{}{}
+		t.byHost[host] = append(t.byHost[host], r)
 		if _, seen := t.firstByPro[r.Provider]; !seen {
 			t.firstByPro[r.Provider] = r
 		}
@@ -63,11 +91,131 @@ func Parse(yamlBytes []byte) (*Table, error) {
 	return t, nil
 }
 
-// ByHost looks up the route declaration for an exact host (case-insensitive).
+// pathPrefixMatches reports whether a row's path_prefix matches a request/
+// stored path. Segment-aligned (design D-2b / task 1b.3): "/api/anthropic"
+// matches "/api/anthropic" and "/api/anthropic/v1" but NOT
+// "/api/anthropicfoo" (avoids "/api/anth" swallowing "/api/anthropic").
+// The empty prefix is the host's catch-all fallback row.
+func pathPrefixMatches(prefix, path string) bool {
+	if prefix == "" {
+		return true
+	}
+	if path == prefix {
+		return true
+	}
+	return strings.HasPrefix(path, prefix+"/")
+}
+
+// Lookup resolves the route row for a (host, path) pair using a
+// segment-aligned longest-prefix match on path_prefix. The path is the
+// path component of the stored/effective base_url. Returns ok=false when
+// the host isn't in the table or no row's prefix matches (which for a
+// host whose only row is the "" fallback never happens — that row always
+// matches). Ties on prefix length cannot occur: (host,path_prefix) is
+// unique per Parse.
+func (t *Table) Lookup(host, path string) (Route, bool) {
+	rows, ok := t.byHost[strings.ToLower(host)]
+	if !ok {
+		return Route{}, false
+	}
+	bestLen := -1
+	var best Route
+	for _, r := range rows {
+		if pathPrefixMatches(r.PathPrefix, path) && len(r.PathPrefix) > bestLen {
+			bestLen = len(r.PathPrefix)
+			best = r
+		}
+	}
+	if bestLen < 0 {
+		return Route{}, false
+	}
+	return best, true
+}
+
+// SupportsProviderProtocol reports whether (provider, protocol) is a legal
+// combination — i.e. some provider_routes row declares it (design D-14/D-15:
+// the routes table IS the compatibility matrix, no separate compat table).
+// Case-insensitive. This is the single source both master (import) and proxy
+// consult, so their answers can't drift.
+func (t *Table) SupportsProviderProtocol(provider, protocol string) bool {
+	p, pr := strings.ToLower(provider), strings.ToLower(protocol)
+	for _, r := range t.rows {
+		if strings.ToLower(r.Provider) == p && strings.ToLower(r.Protocol) == pr {
+			return true
+		}
+	}
+	return false
+}
+
+// ProtocolsForProvider returns the distinct protocols a provider supports
+// (yaml order, de-duplicated). Empty when the provider is unknown. Used by
+// master form filtering (select a provider → offer only its protocols).
+func (t *Table) ProtocolsForProvider(provider string) []string {
+	p := strings.ToLower(provider)
+	seen := map[string]struct{}{}
+	var out []string
+	for _, r := range t.rows {
+		if strings.ToLower(r.Provider) == p {
+			if _, dup := seen[r.Protocol]; !dup {
+				seen[r.Protocol] = struct{}{}
+				out = append(out, r.Protocol)
+			}
+		}
+	}
+	return out
+}
+
+// ProvidersForProtocol returns the distinct providers that speak a protocol
+// (yaml order, de-duplicated). Used by master form filtering (select a
+// protocol → offer only compatible providers).
+func (t *Table) ProvidersForProtocol(protocol string) []string {
+	p := strings.ToLower(protocol)
+	seen := map[string]struct{}{}
+	var out []string
+	for _, r := range t.rows {
+		if strings.ToLower(r.Protocol) == p {
+			if _, dup := seen[r.Provider]; !dup {
+				seen[r.Provider] = struct{}{}
+				out = append(out, r.Provider)
+			}
+		}
+	}
+	return out
+}
+
+// LookupByBaseURL resolves the route row for a stored/effective base_url by
+// extracting its host and path and running the same segment-aligned
+// longest-prefix match as Lookup. Mirrors the Rust route_for_base_url so
+// both languages resolve a GLM /api/anthropic base_url to the anthropic
+// row (not the /api/paas fallback). Returns ok=false on parse failure or
+// host miss.
+func (t *Table) LookupByBaseURL(baseURL string) (Route, bool) {
+	host := HostFromURL(baseURL)
+	if host == "" {
+		return Route{}, false
+	}
+	path := ""
+	if u, err := url.Parse(baseURL); err == nil {
+		path = u.Path
+	}
+	return t.Lookup(host, path)
+}
+
+// ByHost looks up a host's fallback (path_prefix "") row, or its first row
+// if none has an empty prefix. Retained for callers that only have a host
+// and no path; path-aware callers must use Lookup. Case-insensitive.
 // Returns ok=false when the host isn't in the table.
 func (t *Table) ByHost(host string) (Route, bool) {
-	r, ok := t.byHost[strings.ToLower(host)]
-	return r, ok
+	rows, ok := t.byHost[strings.ToLower(host)]
+	if !ok || len(rows) == 0 {
+		return Route{}, false
+	}
+	for _, r := range rows {
+		if r.PathPrefix == "" {
+			return r, true
+		}
+	}
+	return rows[0], true
 }
 
 // ByProvider returns the first row matching a canonical provider_code
