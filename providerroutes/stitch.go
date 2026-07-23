@@ -38,18 +38,46 @@ func (t *Table) Stitch(req *http.Request, vaultBaseURL string) error {
 	if err != nil {
 		return fmt.Errorf("providerroutes: parse base_url: %w", err)
 	}
+	basePath, version := t.resolveStitchComponents(target.Host, target.Path)
+	stitchRequestURL(req, target, basePath, version)
+	return nil
+}
+
+// StitchForProviderProtocol is the explicit-route counterpart of Stitch for
+// deployment-specific upstream addresses. It preserves the runtime host and
+// path (for example 127.0.0.1/mock-provider/openai), while taking the version
+// segment from the canonical (provider, protocol) fingerprint row.
+//
+// This is intentionally explicit instead of guessing from an unknown host or
+// path suffix: a private third-party gateway must retain Stitch's degraded
+// literal-prepend behaviour, while a resident provider whose address changes
+// between host and cluster rails still needs deterministic version handling.
+func (t *Table) StitchForProviderProtocol(req *http.Request, runtimeBaseURL, provider, protocol string) error {
+	target, err := url.Parse(runtimeBaseURL)
+	if err != nil {
+		return fmt.Errorf("providerroutes: parse runtime base_url: %w", err)
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return fmt.Errorf("providerroutes: runtime base_url must include scheme and host")
+	}
+	route, ok := t.ByProviderProtocol(provider, protocol)
+	if !ok {
+		return fmt.Errorf("providerroutes: no unique route for provider %q protocol %q", provider, protocol)
+	}
+
+	basePath := strings.TrimRight(target.Path, "/")
+	if route.Version != "" {
+		basePath = strings.TrimSuffix(basePath, route.Version)
+	}
+	stitchRequestURL(req, target, basePath, route.Version)
+	return nil
+}
+
+func stitchRequestURL(req *http.Request, target *url.URL, basePath, version string) {
 
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
 	req.Host = target.Host
-
-	if target.Path == "" || target.Path == "/" {
-		// In-table lookup may still apply (table's base_url may carry a
-		// path prefix the user's stored base_url didn't have). Continue
-		// with the lookup path, otherwise the path stays as-is below.
-	}
-
-	basePath, version := t.resolveStitchComponents(target.Host, target.Path)
 	reqPath := req.URL.Path
 	if version != "" {
 		switch {
@@ -68,7 +96,6 @@ func (t *Table) Stitch(req *http.Request, vaultBaseURL string) error {
 	if req.URL.RawPath != "" {
 		req.URL.RawPath = stitched
 	}
-	return nil
 }
 
 // resolveStitchComponents returns (base path, version) for stitching.
