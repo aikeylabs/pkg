@@ -29,10 +29,15 @@ type Route struct {
 	// identical behaviour. omitempty keeps the JSON re-emission (rules
 	// endpoint) backward compatible for the web consumer.
 	PathPrefix string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
+	// Default explicitly selects the canonical endpoint when one
+	// Provider+Protocol pair has multiple hosts. It avoids making YAML order a
+	// routing decision (for example api.kimi.com vs www.kimi.com).
+	Default bool `yaml:"default,omitempty" json:"default,omitempty"`
 }
 
 // Table is an indexed read-only view of the parsed provider_routes rows.
-// Build via Parse; lookup via Lookup (host+path) / ByHost / ByProvider.
+// Build via Parse; lookup via Lookup (host+path), ByHost, ByProvider, or
+// ByProviderProtocol.
 type Table struct {
 	rows       []Route
 	byHost     map[string][]Route  // host (lowercased) → rows (yaml order)
@@ -226,6 +231,55 @@ func (t *Table) ByHost(host string) (Route, bool) {
 func (t *Table) ByProvider(provider string) (Route, bool) {
 	r, ok := t.firstByPro[provider]
 	return r, ok
+}
+
+// ByProviderProtocol returns the default route for an exact canonical
+// (provider, protocol) pair. It is the safe fallback for callers that know
+// both axes but do not have a base URL to resolve with LookupByBaseURL.
+//
+// A pair normally has one row. When it has multiple endpoint rows, a single
+// empty-path row is the explicit catch-all and therefore the default. If the
+// pair has multiple rows without exactly one catch-all, there is no truthful
+// default; return ok=false instead of making YAML insertion order observable.
+// Matching is case-insensitive.
+func (t *Table) ByProviderProtocol(provider, protocol string) (Route, bool) {
+	p, pr := strings.ToLower(provider), strings.ToLower(protocol)
+	var (
+		matched              Route
+		matchedCount         int
+		fallback             Route
+		fallbackCount        int
+		declaredDefault      Route
+		declaredDefaultCount int
+	)
+	for _, r := range t.rows {
+		if strings.ToLower(r.Provider) != p || strings.ToLower(r.Protocol) != pr {
+			continue
+		}
+		matched = r
+		matchedCount++
+		if r.Default {
+			declaredDefault = r
+			declaredDefaultCount++
+		}
+		if r.PathPrefix == "" {
+			fallback = r
+			fallbackCount++
+		}
+	}
+	if declaredDefaultCount == 1 {
+		return declaredDefault, true
+	}
+	if declaredDefaultCount > 1 {
+		return Route{}, false
+	}
+	if matchedCount == 1 {
+		return matched, true
+	}
+	if fallbackCount == 1 {
+		return fallback, true
+	}
+	return Route{}, false
 }
 
 // All returns every loaded row in yaml insertion order. Stable for

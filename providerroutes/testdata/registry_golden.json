@@ -39,11 +39,28 @@
       "version": "/v1"
     },
     {
+      "host": "mock-provider.aikey.internal",
+      "path_prefix": "/anthropic",
+      "protocol": "anthropic",
+      "provider": "mock",
+      "base_url": "http://mock-provider.aikey.internal/anthropic",
+      "version": "/v1"
+    },
+    {
+      "host": "mock-provider.aikey.internal",
+      "path_prefix": "/openai",
+      "protocol": "openai_compatible",
+      "provider": "mock",
+      "base_url": "http://mock-provider.aikey.internal/openai",
+      "version": "/v1"
+    },
+    {
       "host": "api.kimi.com",
       "protocol": "openai_compatible",
       "provider": "kimi_code",
       "base_url": "https://api.kimi.com/coding",
-      "version": "/v1"
+      "version": "/v1",
+      "default": true
     },
     {
       "host": "www.kimi.com",
@@ -57,7 +74,8 @@
       "protocol": "openai_compatible",
       "provider": "moonshot",
       "base_url": "https://api.moonshot.cn",
-      "version": "/v1"
+      "version": "/v1",
+      "default": true
     },
     {
       "host": "platform.moonshot.cn",
@@ -83,7 +101,7 @@
     {
       "host": "api.x.ai",
       "protocol": "openai_compatible",
-      "provider": "xai_grok",
+      "provider": "xai",
       "base_url": "https://api.x.ai",
       "version": "/v1"
     },
@@ -104,7 +122,7 @@
     {
       "host": "generativelanguage.googleapis.com",
       "protocol": "gemini",
-      "provider": "google_gemini",
+      "provider": "google",
       "base_url": "https://generativelanguage.googleapis.com",
       "version": "/v1beta"
     },

@@ -85,6 +85,81 @@ func TestByProviderKimiCodeAndMoonshot(t *testing.T) {
 	}
 }
 
+func TestByProviderProtocolIsIndependentOfProtocolRowOrder(t *testing.T) {
+	const anthropicFirst = `
+provider_routes:
+  - { host: "mock.internal", path_prefix: "/anthropic", protocol: anthropic, provider: mock, base_url: "http://mock.internal/anthropic", version: "/v1" }
+  - { host: "mock.internal", path_prefix: "/openai", protocol: openai_compatible, provider: mock, base_url: "http://mock.internal/openai", version: "/v1" }
+`
+	const openAIFirst = `
+provider_routes:
+  - { host: "mock.internal", path_prefix: "/openai", protocol: openai_compatible, provider: mock, base_url: "http://mock.internal/openai", version: "/v1" }
+  - { host: "mock.internal", path_prefix: "/anthropic", protocol: anthropic, provider: mock, base_url: "http://mock.internal/anthropic", version: "/v1" }
+`
+
+	for _, src := range []string{anthropicFirst, openAIFirst} {
+		tbl := mustParse(t, src)
+		anthropic, ok := tbl.ByProviderProtocol("MOCK", "Anthropic")
+		if !ok || anthropic.BaseURL != "http://mock.internal/anthropic" {
+			t.Fatalf("mock/anthropic = (%+v,%v), want the Anthropic endpoint", anthropic, ok)
+		}
+		openAI, ok := tbl.ByProviderProtocol("mock", "openai_compatible")
+		if !ok || openAI.BaseURL != "http://mock.internal/openai" {
+			t.Fatalf("mock/openai_compatible = (%+v,%v), want the OpenAI endpoint", openAI, ok)
+		}
+	}
+}
+
+func TestByProviderProtocolUsesUniqueCatchAllForMultiEndpointPair(t *testing.T) {
+	tbl := mustParse(t, glmYAML)
+	r, ok := tbl.ByProviderProtocol("zhipu", "openai_compatible")
+	if !ok {
+		t.Fatal("zhipu/openai_compatible must resolve its unique catch-all row")
+	}
+	if r.PathPrefix != "" || r.BaseURL != "https://open.bigmodel.cn/api/paas" {
+		t.Fatalf("default route = %+v, want the empty-prefix GLM endpoint", r)
+	}
+}
+
+func TestByProviderProtocolUsesDeclaredDefaultAcrossHosts(t *testing.T) {
+	tbl := mustParse(t, `
+provider_routes:
+  - { host: "alias.example", protocol: openai_compatible, provider: kimi_like, base_url: "https://alias.example", version: "/v1" }
+  - { host: "canonical.example", protocol: openai_compatible, provider: kimi_like, base_url: "https://canonical.example", version: "/v1", default: true }
+`)
+	r, ok := tbl.ByProviderProtocol("kimi_like", "openai_compatible")
+	if !ok || r.Host != "canonical.example" {
+		t.Fatalf("declared default = (%+v,%v), want canonical.example", r, ok)
+	}
+}
+
+func TestByProviderProtocolRejectsAmbiguousDefault(t *testing.T) {
+	tbl := mustParse(t, `
+provider_routes:
+  - { host: "one.example", path_prefix: "/v1", protocol: anthropic, provider: aggregate, base_url: "https://one.example/v1", version: "" }
+  - { host: "two.example", path_prefix: "/v2", protocol: anthropic, provider: aggregate, base_url: "https://two.example/v2", version: "" }
+`)
+	if r, ok := tbl.ByProviderProtocol("aggregate", "anthropic"); ok {
+		t.Fatalf("ambiguous pair resolved to %+v; want fail-loud", r)
+	}
+}
+
+func TestEmbeddedMockProviderDeclaresBothProtocols(t *testing.T) {
+	tbl := Default()
+	for _, protocol := range []string{"anthropic", "openai_compatible"} {
+		route, ok := tbl.ByProviderProtocol("mock", protocol)
+		if !ok {
+			t.Fatalf("embedded Mock Provider route missing for protocol %q", protocol)
+		}
+		if route.Provider != "mock" || route.Protocol != protocol {
+			t.Fatalf("route = (%q,%q), want (mock,%s)", route.Provider, route.Protocol, protocol)
+		}
+		if route.Host != "mock-provider.aikey.internal" {
+			t.Fatalf("route host = %q, want stable Mock Provider logical host", route.Host)
+		}
+	}
+}
+
 func TestEffectiveUpstreamHandlesEmptyVersion(t *testing.T) {
 	tbl := mustParse(t, minimalYAML)
 	kimi, _ := tbl.ByHost("api.kimi.com")
@@ -183,6 +258,63 @@ func TestStitchContract(t *testing.T) {
 				t.Errorf("Path = %q, want %q", req.URL.Path, tc.wantPath)
 			}
 		})
+	}
+}
+
+func TestStitchForProviderProtocolPreservesRuntimeRailAndCanonicalVersion(t *testing.T) {
+	tbl := Default()
+	cases := []struct {
+		name     string
+		baseURL  string
+		reqPath  string
+		protocol string
+		wantPath string
+	}{
+		{
+			name:    "mock_openai_responses_without_version",
+			baseURL: "http://127.0.0.1:3000/mock-provider/openai", reqPath: "/responses",
+			protocol: "openai_compatible", wantPath: "/mock-provider/openai/v1/responses",
+		},
+		{
+			name:    "mock_anthropic_deduplicates_client_version",
+			baseURL: "http://host.docker.internal:3000/mock-provider/anthropic", reqPath: "/v1/messages",
+			protocol: "anthropic", wantPath: "/mock-provider/anthropic/v1/messages",
+		},
+		{
+			name:    "runtime_base_already_contains_version",
+			baseURL: "http://127.0.0.1:3000/mock-provider/openai/v1", reqPath: "/v1/responses",
+			protocol: "openai_compatible", wantPath: "/mock-provider/openai/v1/responses",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest("POST", "http://placeholder"+tc.reqPath, nil)
+			req.URL = &url.URL{Path: tc.reqPath}
+			target, err := url.Parse(tc.baseURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tbl.StitchForProviderProtocol(req, tc.baseURL, "mock", tc.protocol); err != nil {
+				t.Fatalf("StitchForProviderProtocol: %v", err)
+			}
+			if req.URL.Host != target.Host {
+				t.Errorf("Host = %q, runtime rail was not preserved", req.URL.Host)
+			}
+			if req.URL.Path != tc.wantPath {
+				t.Errorf("Path = %q, want %q", req.URL.Path, tc.wantPath)
+			}
+		})
+	}
+}
+
+func TestStitchForProviderProtocolRejectsUnknownPair(t *testing.T) {
+	req, _ := http.NewRequest("POST", "http://placeholder/messages", nil)
+	if err := Default().StitchForProviderProtocol(req, "http://127.0.0.1:3000/custom", "mock", "gemini"); err == nil {
+		t.Fatal("expected unsupported provider/protocol pair to fail loud")
+	}
+	if err := Default().StitchForProviderProtocol(req, "", "mock", "anthropic"); err == nil {
+		t.Fatal("expected empty runtime base URL to fail loud")
 	}
 }
 
