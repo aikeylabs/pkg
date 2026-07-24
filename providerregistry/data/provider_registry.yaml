@@ -1,0 +1,300 @@
+# Provider Registry — single source of truth for provider capability.
+#
+# This file is the ONLY place that declares:
+#   - env var names (hook / activate writes to ~/.aikey/active.env)
+#   - proxy path prefix (aikey-proxy routes /<path>/* to the upstream)
+#   - default base URL (for connectivity probes + drawer "official URL" hint)
+#   - picker visibility (shown in `aikey add` interactive provider select)
+#   - oauth broker aliases (claude→anthropic normalization at binding write)
+#   - native client route (the `family` field; e.g. kimi_code→kimi)
+#   - extra env vars (e.g. KIMI_MODEL_NAME for SDKs that need it)
+#
+# Consumers (all Rust-side, loaded via src/provider_registry.rs):
+#   - commands_account::provider_info / provider_env_vars / provider_proxy_prefix
+#   - commands_account::oauth_provider_to_canonical  (alias table)
+#   - connectivity::PROVIDER_DEFAULTS / default_base_url
+#   - main.rs `aikey add` KNOWN_PROVIDERS picker
+#   - commands_internal::query::protocol_family_of  (protocol family helper)
+#
+# aikey-proxy (Go side) has a parallel table in internal/proxy/middleware.go
+# that MUST be kept in sync until we codegen a shared JSON at build time.
+# See Go comment there for the cross-language drift risk.
+#
+# Adding a new provider = add one entry here + mirror default_base_url +
+# proxy_path + canonical_code mapping into the Go middleware.go table.
+#
+# Field reference:
+#   code              (required)  canonical provider_code stored in bindings
+#   family            (optional)  protocol family for UI grouping (default = code)
+#   oauth_aliases     (optional)  names that oauth_provider_to_canonical → code
+#   proxy_path        (required)  URL path segment in aikey-proxy (e.g. "groq/openai/v1")
+#   env_api_key       (required)  API key env var name (e.g. "GROQ_API_KEY")
+#   env_base_url      (required)  base URL env var name (e.g. "GROQ_BASE_URL")
+#   default_base_url  (required)  upstream default URL (used in drawer hint, probe)
+#   picker            (required)  true to appear in `aikey add` interactive list
+#   display           (optional)  human label shown in picker (default = code)
+#   extra_env_vars    (optional)  extras written alongside api_key/base_url
+#                                 list of {var, value}
+#   clients           (optional)  per-client-surface config namespace. A
+#                                 "client" is a consuming app surface (e.g.
+#                                 claude-desktop). Third occurrence of
+#                                 per-client config (kimi extra_env_vars /
+#                                 openclaw hardcoded models[] / Desktop menu)
+#                                 promoted "client" to a first-class key:
+#                                 a new client = a new key here, never a new
+#                                 top-level field. Unknown client keys are
+#                                 ignored by older CLIs (forward compat).
+#                                 Existing per-client config (openclaw code,
+#                                 kimi extra_env_vars) stays put this cycle;
+#                                 future evolution may fold them in here.
+#                                 Go middleware.go parallel table does NOT
+#                                 consume `clients` — no cross-language sync.
+#     <client>.models (optional)  model menu for that client. Entries are a
+#                                 bare string or {name, supports_1m}.
+
+providers:
+  # ──────────────────────────────────────────────────────────────────
+  # Core Western providers (originally in KNOWN_PROVIDERS / provider_info)
+  # ──────────────────────────────────────────────────────────────────
+  - code: anthropic
+    oauth_aliases: [claude]
+    proxy_path: anthropic
+    env_api_key: ANTHROPIC_API_KEY
+    env_base_url: ANTHROPIC_BASE_URL
+    default_base_url: https://api.anthropic.com
+    picker: true
+    display: anthropic
+    # Per 2026-05-12 display-label convention: single-platform families get
+    # a brand alias rendered in muted parenthetical so users see the CLI tool
+    # they recognize ("claude") next to the canonical provider code. The
+    # multi-platform Kimi family keeps its (platform-code) parenthetical in
+    # the display field itself instead — see kimi_code / moonshot below.
+    display_alias: claude
+    clients:
+      claude-desktop:
+        # Claude Desktop 3p-gateway menu (D4 rev2, 2026-07-12). Every name is
+        # validated claude-safe (claude-{sonnet|opus|haiku|fable}-*, no "[1m]")
+        # before writing — Desktop rejects the WHOLE list on one bad entry
+        # (fail-all, cc-switch is_claude_safe_model_id). STATIC list on
+        # purpose: do NOT auto-fetch /v1/models here — newer models are often
+        # account-permission-gated and would 404 for many users (same lesson
+        # as the moonshot default-model note below, 2026-07-08).
+        models:
+          - claude-sonnet-5
+          - {name: claude-opus-4-8, supports_1m: true}
+          - claude-haiku-4-5
+          - claude-fable-5
+
+  - code: openai
+    oauth_aliases: [gpt, chatgpt, codex]
+    proxy_path: openai
+    env_api_key: OPENAI_API_KEY
+    env_base_url: OPENAI_BASE_URL
+    default_base_url: https://api.openai.com/v1
+    picker: true
+    display: openai
+    display_alias: codex
+
+  # Master-resident test provider. It is deliberately absent from the normal
+  # API-key picker; the feature-gated OAuth account dialog is its only creation
+  # entry. Supported protocols and upstream URLs come exclusively from
+  # provider_routes. It intentionally has NO client env namespace or proxy
+  # path: Mock is a Provider, not a Protocol/client surface. An exact
+  # Mock+anthropic binding is selected through the anthropic/Claude route; an
+  # exact Mock+openai_compatible binding through the openai/Codex route.
+  - code: mock
+    proxy_path: ""
+    env_api_key: ""
+    env_base_url: ""
+    default_base_url: ""
+    picker: false
+    display: Mock Provider
+
+  - code: google
+    oauth_aliases: [gemini]
+    proxy_path: google
+    env_api_key: GOOGLE_API_KEY
+    env_base_url: GOOGLE_BASE_URL
+    default_base_url: https://generativelanguage.googleapis.com
+    picker: true
+    display: google
+    display_alias: gemini
+
+  - code: deepseek
+    # DeepSeek upstream already contains /v1 → proxy path bare.
+    proxy_path: deepseek
+    env_api_key: DEEPSEEK_API_KEY
+    env_base_url: DEEPSEEK_BASE_URL
+    default_base_url: https://api.deepseek.com/v1
+    picker: true
+    display: deepseek
+
+  # 2026-05-08 Kimi 双平台拆分：原单一 'kimi' 条目拆为 'kimi_code' + 'moonshot' 两条。
+  #   - 旧 'kimi' 字符串作为 oauth_aliases 挂在 kimi_code 上,registry.lookup("kimi")
+  #     → kimi_code entry; oauth_provider_to_canonical("kimi") → "kimi_code"。
+  #     CLI auth login kimi / 老脚本 / 老 vault 残留 / broker 字面值 "kimi" 都会被
+  #     归一化到 'kimi_code'。Why alias 而非独立 entry:独立 entry 让 canonical()
+  #     返回 "kimi" 自身,binding 写到 vault 时仍是 deprecated 形态,绕过拆分。
+  #   - 'moonshot' 从 picker: false 升为 picker: true,UI 标签 'kimi(moonshot)';
+  #     表示 platform.moonshot.cn 的 OpenAI 兼容产品线 (no OAuth,只 API key)。
+  #   - 'kimi_code' 是新增的精确码,UI 标签 'kimi(kimi-code)';sk-kimi-* 前缀稳定独占;
+  #     family Kimi 内**唯一支持 OAuth** 的产品 (kimi-cli device-code flow)。
+  #   - 三者 family=kimi (UI 分组归一);env_api_key/extra_env_vars 在 kimi_code 沿用
+  #     KIMI_* 命名(与现存 shell hook / Kimi CLI 兼容,不强制用户重设 env)。
+  - code: kimi_code
+    family: kimi
+    # 'kimi' 是 deprecated 别名:CLI auth login kimi / 老 vault 残留 provider_code
+    # 都通过 alias 解析到 kimi_code 这个 canonical entry,oauth_provider_to_canonical
+    # 自动归一化无需 provider_canonical_code 上单独处理。
+    oauth_aliases: [kimi]
+    # Why proxy_path 仍是 'kimi/v1' (而非 'kimi_code/v1'): 旧版本 shell hook 已经把
+    # KIMI_BASE_URL 设为 http://127.0.0.1:27200/kimi/v1; 改 path 会让用户已经打开的
+    # 终端断流。新 path 唯一收益是命名更精确,代价是用户体验损失,不值。
+    # Why /v1: Kimi OpenAI-compatible SDK appends /chat/completions relative
+    # to base_url. Kimi's upstream base is /coding (no /v1), so the proxy-
+    # side path MUST carry /v1 for the final URL to hit /coding/v1/...
+    proxy_path: kimi/v1
+    env_api_key: KIMI_API_KEY
+    env_base_url: KIMI_BASE_URL
+    default_base_url: https://api.kimi.com/coding/v1
+    picker: true
+    display: kimi(kimi-code)
+    extra_env_vars:
+      - {var: KIMI_MODEL_NAME, value: "kimi-k2.5"}
+      - {var: KIMI_MODEL_MAX_CONTEXT_SIZE, value: "131072"}
+
+  - code: moonshot
+    # 'kimi(moonshot)' picker — Moonshot platform (api.moonshot.cn).
+    # Why picker: true: 双平台拆分后 UI 必须给用户两个明确选项,不能再隐藏。
+    #
+    # 2026-05-08 Kimi family 互斥 + active.env 统一 KIMI_* 写入(详见
+    # roadmap20260320/技术实现/update/20260508-Kimi-family互斥-active-env统一KIMI写入.md):
+    # ① env_api_key / env_base_url 从 MOONSHOT_* 改回 KIMI_*,与 kimi_code 一致 ——
+    #    Kimi family 内 active binding 互斥(同时只 1 个),激活哪条都走 KIMI_API_KEY
+    #    / KIMI_BASE_URL,kimi CLI 上游只读这一组。区分 platform 由 proxy_path 决定:
+    #    moonshot 走 /moonshot/v1 → 上游 api.moonshot.cn;kimi_code 走 /kimi/v1 →
+    #    上游 api.kimi.com/coding。
+    # ② extra_env_vars KIMI_MODEL_NAME 从 kimi-k2.5 改为 moonshot-v1-128k,
+    #    Moonshot 上游不支持 kimi-k2.5(原值是从 kimi_code 复制的 bug)。
+    # ③ MOONSHOT_API_KEY / MOONSHOT_BASE_URL 三层证据(kimi-cli runtime grep /
+    #    Moonshot 官方 env-vars 文档 / 项目内 grep)实证无消费方,直接停写。
+    # ④ KIMI_MODEL_MAX_CONTEXT_SIZE = 131072(moonshot-v1-128k 上限 128K)。
+    #
+    # 2026-07-08 默认模型 8k→moonshot-v1-128k 反转(详见 update/20260708-moonshot-
+    # 默认模型-8k-改-kimi-latest.md;bugfix/2026-07-08-moonshot-default-model-8k-
+    # breaks-kimi-cli.md):
+    #   决策 #9 原拍板 B(moonshot-v1-8k / 8192,"配最便宜的 8k,长文自行升级")的
+    #   前提是"用户从短请求起步"。但 Kimi CLI 光系统提示词就 ~12.4K token > 8192,
+    #   moonshot 协议下从第一句 "hello" 就必然 400 token-limit-exceeded —— 等于
+    #   开箱即废,且用户无任何 UI 入口改模型(model 写死在本 registry)。前提不成立,
+    #   故抬高默认到 128K 上下文模型。
+    #   ⚠️ 为什么是 moonshot-v1-128k 而不是"更新/更智能"的 kimi-latest / kimi-k2*:
+    #      kimi-latest 等新模型在 api.moonshot.cn 上是**账号权限门控**的 —— 实测某
+    #      账号跑 kimi-latest 直接 404 "Not found the model or Permission denied",
+    #      而基础的 moonshot-v1 家族(8k/32k/128k,同一权限档)所有账号都够得着。
+    #      DEFAULT 的目标是"最大范围账号开箱可用",要的是**最广兼容**而非**最新**。
+    #      => 任何"自动追最新模型"的想法(含构建期拉取)在这里都是反模式:越新的
+    #         模型越可能权限门控,会让默认对更多账号 404。
+    #   ⚠️ 未来若见此处想改回 8k 省钱,请先确认 Kimi CLI 最小提示词是否已 <8K,
+    #      否则会再次退化为开箱即废(regression: provider_extra_env_vars_kimi_
+    #      family_per_platform_model 围栏测试守住此值)。
+    family: kimi
+    proxy_path: moonshot/v1
+    env_api_key: KIMI_API_KEY
+    env_base_url: KIMI_BASE_URL
+    default_base_url: https://api.moonshot.cn/v1
+    picker: true
+    display: kimi(moonshot)
+    extra_env_vars:
+      - {var: KIMI_MODEL_NAME, value: "moonshot-v1-128k"}
+      - {var: KIMI_MODEL_MAX_CONTEXT_SIZE, value: "131072"}
+
+  # ──────────────────────────────────────────────────────────────────
+  # P0 additions (2026-04-24) — widely-adopted OpenAI-compatible Western
+  # providers, already recognized in provider_fingerprint.yaml.
+  # ──────────────────────────────────────────────────────────────────
+  - code: groq
+    proxy_path: groq/openai/v1
+    env_api_key: GROQ_API_KEY
+    env_base_url: GROQ_BASE_URL
+    default_base_url: https://api.groq.com/openai/v1
+    picker: true
+    display: groq
+
+  - code: xai
+    # Parse-fingerprint uses "xai_grok" family; alias maps it to canonical.
+    oauth_aliases: [grok, xai_grok]
+    proxy_path: xai/v1
+    env_api_key: XAI_API_KEY
+    env_base_url: XAI_BASE_URL
+    default_base_url: https://api.x.ai/v1
+    picker: true
+    # Migrated 2026-05-12 from inline-paren `display: xai (grok)` to
+    # structured display_alias so renderers can dim the parenthetical.
+    display: xai
+    display_alias: grok
+
+  - code: openrouter
+    proxy_path: openrouter/api/v1
+    env_api_key: OPENROUTER_API_KEY
+    env_base_url: OPENROUTER_BASE_URL
+    default_base_url: https://openrouter.ai/api/v1
+    picker: true
+    display: openrouter
+
+  - code: perplexity
+    oauth_aliases: [pplx]
+    proxy_path: perplexity/v1
+    env_api_key: PERPLEXITY_API_KEY
+    env_base_url: PERPLEXITY_BASE_URL
+    default_base_url: https://api.perplexity.ai/v1
+    picker: true
+    display: perplexity
+
+  # ──────────────────────────────────────────────────────────────────
+  # P1 additions (2026-04-24) — China-market providers, important for 2B.
+  # ──────────────────────────────────────────────────────────────────
+  - code: zhipu
+    # Brand aliases: "glm" (previously in PROVIDER_DEFAULTS) and "zhipuai"
+    # (民间命名) both canonicalize to "zhipu" at binding write.
+    oauth_aliases: [glm, zhipuai]
+    proxy_path: zhipu/api/paas/v4
+    # Env var name follows the widespread SDK convention (ZHIPUAI_*), not
+    # our canonical code.
+    env_api_key: ZHIPUAI_API_KEY
+    env_base_url: ZHIPUAI_BASE_URL
+    default_base_url: https://open.bigmodel.cn/api/paas/v4
+    picker: true
+    display: zhipu
+    display_alias: GLM
+
+  - code: qwen
+    oauth_aliases: [dashscope, tongyi]
+    proxy_path: qwen/compatible-mode/v1
+    # Alibaba DashScope SDKs universally use DASHSCOPE_API_KEY.
+    env_api_key: DASHSCOPE_API_KEY
+    env_base_url: DASHSCOPE_BASE_URL
+    default_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    picker: true
+    display: qwen
+    display_alias: DashScope
+
+  - code: doubao
+    # User-decided 2026-04-24: canonical code = "doubao" (用户心智里是豆包),
+    # env vars = ARK_* (Volcengine SDK convention).
+    oauth_aliases: [ark, volcengine]
+    proxy_path: doubao/api/v3
+    env_api_key: ARK_API_KEY
+    env_base_url: ARK_BASE_URL
+    default_base_url: https://ark.cn-beijing.volces.com/api/v3
+    picker: true
+    display: doubao
+    display_alias: ARK
+
+  - code: siliconflow
+    proxy_path: siliconflow/v1
+    env_api_key: SILICONFLOW_API_KEY
+    env_base_url: SILICONFLOW_BASE_URL
+    default_base_url: https://api.siliconflow.cn/v1
+    picker: true
+    display: siliconflow
