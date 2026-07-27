@@ -30,13 +30,17 @@ type RoutingResponse struct {
 
 // RouteEntry is one seat's binding within one group.
 //
-// Exactly one of the two states is expressed:
+// Exactly one of the three states is expressed:
 //   - AccountID != ""            → the engine's sticky binding (proxy applies it
 //     when the account is still a valid, usable candidate; else local pick).
 //   - Blocked == true            → the engine left this (seat,group) UNBOUND
 //     (every pool account is at the per-account user cap, or no account may take
 //     a binding at all). The proxy MUST 429 and never fall back to the cap-blind
 //     local pick.
+//   - Removed == true            → access to this (seat,group) was durably
+//     retired. The proxy MUST reject it and must not reconstruct candidates
+//     from last-known runtime material. This explicit tombstone is distinct
+//     from an absent entry, which still means "not bound yet" for compatibility.
 //
 // AccountID == "" with Blocked == false is not emitted.
 type RouteEntry struct {
@@ -44,4 +48,5 @@ type RouteEntry struct {
 	GroupID   string `json:"group_id"`
 	AccountID string `json:"account_id,omitempty"`
 	Blocked   bool   `json:"blocked,omitempty"`
+	Removed   bool   `json:"removed,omitempty"`
 }
