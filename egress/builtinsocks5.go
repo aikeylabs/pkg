@@ -21,7 +21,9 @@ package egress
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	xproxy "golang.org/x/net/proxy"
@@ -119,6 +121,30 @@ func parseSocks5URL(raw string) (addr string, auth *xproxy.Auth, err error) {
 	}
 	if u.Host == "" {
 		return "", nil, fmt.Errorf("proxy url %q has no host", raw)
+	}
+	// 🔴 A non-empty Host is NOT the same as a dialable one (found 2026-07-31 by
+	// the fence in aikey-proxy/app/transport_strict_test.go, which had been failing
+	// on exactly this). `url.Parse("socks5://:::::")` succeeds and yields Host
+	// ":::::", and x/net/proxy.SOCKS5 stores the address without validating it —
+	// so an unusable chain BUILT cleanly and only failed later, at dial.
+	//
+	// That is the difference between a config error and an outage. Built cleanly,
+	// the console's Test-connectivity button reports a dial timeout and points the
+	// operator at the exit node; the exit node is fine and the typo is in the spec
+	// they are looking straight at. Rejecting here is also lossless: an address
+	// net.SplitHostPort cannot split is one net.Dial could never have dialed.
+	host, port, splitErr := net.SplitHostPort(u.Host)
+	if splitErr != nil {
+		return "", nil, fmt.Errorf("proxy url %q is not a dialable host:port: %w", raw, splitErr)
+	}
+	if host == "" {
+		return "", nil, fmt.Errorf("proxy url %q has no host", raw)
+	}
+	// A named port ("socks5://h:proxy") is rejected on purpose: it would resolve
+	// via /etc/services on some hosts and not others, so the same spec would work
+	// on one node and fail on the next.
+	if p, perr := strconv.Atoi(port); perr != nil || p < 1 || p > 65535 {
+		return "", nil, fmt.Errorf("proxy url %q has an invalid port %q (want 1-65535)", raw, port)
 	}
 	if pw, ok := u.User.Password(); ok {
 		auth = &xproxy.Auth{User: u.User.Username(), Password: pw}
