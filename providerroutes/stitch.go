@@ -98,9 +98,85 @@ func stitchRequestURL(req *http.Request, target *url.URL, basePath, version stri
 	}
 }
 
+// PathDiscarded reports whether resolving storedBaseURL through this table
+// would THROW AWAY path information the stored URL carries — and returns the
+// row that swallowed it.
+//
+// # R-9 (2026-08-02, provider-credential-cascade): why a query for this exists
+//
+// A host's fallback row (path_prefix "") matches ANY path. So a credential
+// stored as https://api.deepseek.com/anthropic/v1 against a table that does not
+// yet know the /anthropic row resolves happily to the plain deepseek row, and
+// the /anthropic segment is discarded as noise — an Anthropic-shaped body is
+// posted to the OpenAI endpoint. Crucially LookupByBaseURL returns ok=TRUE
+// (a row really was found), so the existing proxy.route.not_found WARN, which
+// fires only on a host MISS, never triggers. The failure is completely silent.
+//
+// That shape was nearly unreachable while zhipu was the only provider with it.
+// This change takes it from 1 provider to 5 (deepseek / moonshot.cn / dashscope
+// / ark / zhipu) AND has the console hand those exact URLs to administrators —
+// so a rare latent trap moves onto the main road. Callers use this to emit a
+// WARN. 🚫 It must NOT change any forwarding decision; see stitchComponents.
+//
+// The condition is deliberately narrow (only the fallback row, only when the
+// stored path carries MORE than the row's own base path). A stored URL that is
+// SHORTER than the row's base path discards nothing — the row supplies the rest
+// — and must not warn. A WARN that fires for everyone is the same as no WARN.
+func (t *Table) PathDiscarded(storedBaseURL string) (matched Route, discarded bool) {
+	u, err := url.Parse(storedBaseURL)
+	if err != nil || u.Host == "" {
+		return Route{}, false
+	}
+	row, ok := t.Lookup(strings.ToLower(u.Host), u.Path)
+	if !ok {
+		// A host miss is the OTHER failure shape; it already has its own WARN
+		// (proxy.route.not_found). Not ours to report.
+		return Route{}, false
+	}
+	return row, rowDiscardsPath(row, u.Path)
+}
+
+// rowDiscardsPath is the single definition of "this row will swallow part of
+// the stored path". Both PathDiscarded and the doc comment on
+// resolveStitchComponents refer to it so the observability and the routing can
+// never describe different conditions.
+func rowDiscardsPath(row Route, storedPath string) bool {
+	if row.PathPrefix != "" {
+		// A row selected by an explicit prefix matched that prefix on purpose;
+		// it is not a catch-all swallowing an unrecognised path.
+		return false
+	}
+	rowBase := ""
+	if u, err := url.Parse(row.BaseURL); err == nil {
+		rowBase = strings.TrimRight(u.Path, "/")
+	}
+	// Compare like with like: drop the row's version segment from the stored
+	// path first, since the stitch re-attaches it explicitly.
+	stored := strings.TrimRight(storedPath, "/")
+	if row.Version != "" {
+		stored = strings.TrimRight(strings.TrimSuffix(stored, row.Version), "/")
+	}
+	if stored == "" || stored == rowBase {
+		return false // nothing of the user's is being dropped
+	}
+	// If the row's base path EXTENDS the stored path, the row is adding
+	// information, not discarding it (e.g. the very common "user pasted the
+	// bare domain" shape).
+	if pathPrefixMatches(stored, rowBase) {
+		return false
+	}
+	return true
+}
+
 // resolveStitchComponents returns (base path, version) for stitching.
 // Prefers the table row when host is known, falls back to the parsed
 // path with empty version when not (degraded mode).
+//
+// 🔴 R-9 note: when the matched row satisfies rowDiscardsPath, part of the
+// stored path is dropped here. That is the PRE-EXISTING behaviour and this
+// change does not alter it — Table.PathDiscarded exists purely so the caller
+// can say so in the log. Changing the return in that branch would change
+// forwarding, which R-9 explicitly rules out.
 func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, version string) {
 	host = strings.ToLower(host)
 	// P1b (design D-2b): key by (host, path_prefix). The stored base_url's
