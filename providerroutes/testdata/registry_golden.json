@@ -40,19 +40,19 @@
     },
     {
       "host": "mock-provider.aikey.internal",
-      "path_prefix": "/anthropic",
       "protocol": "anthropic",
       "provider": "mock",
       "base_url": "http://mock-provider.aikey.internal/anthropic",
-      "version": "/v1"
+      "version": "/v1",
+      "path_prefix": "/anthropic"
     },
     {
       "host": "mock-provider.aikey.internal",
-      "path_prefix": "/openai",
       "protocol": "openai_compatible",
       "provider": "mock",
       "base_url": "http://mock-provider.aikey.internal/openai",
-      "version": "/v1"
+      "version": "/v1",
+      "path_prefix": "/openai"
     },
     {
       "host": "api.kimi.com",
@@ -139,7 +139,8 @@
       "provider": "zhipu",
       "base_url": "https://open.bigmodel.cn/api/anthropic",
       "version": "/v1",
-      "path_prefix": "/api/anthropic"
+      "path_prefix": "/api/anthropic",
+      "default": true
     },
     {
       "host": "open.bigmodel.cn",
@@ -189,6 +190,210 @@
       "protocol": "openai_compatible",
       "provider": "zeroeleven",
       "base_url": "https://aicoding.2233.ai",
+      "version": "/v1"
+    },
+    {
+      "host": "api.deepseek.com",
+      "protocol": "anthropic",
+      "provider": "deepseek",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "version": "/v1",
+      "path_prefix": "/anthropic"
+    },
+    {
+      "host": "api.moonshot.cn",
+      "protocol": "anthropic",
+      "provider": "moonshot",
+      "base_url": "https://api.moonshot.cn/anthropic",
+      "version": "/v1",
+      "path_prefix": "/anthropic",
+      "default": true
+    },
+    {
+      "host": "api.moonshot.ai",
+      "protocol": "anthropic",
+      "provider": "moonshot",
+      "base_url": "https://api.moonshot.ai/anthropic",
+      "version": "/v1",
+      "path_prefix": "/anthropic"
+    },
+    {
+      "host": "api.moonshot.ai",
+      "protocol": "openai_compatible",
+      "provider": "moonshot",
+      "base_url": "https://api.moonshot.ai",
+      "version": "/v1"
+    },
+    {
+      "host": "dashscope.aliyuncs.com",
+      "protocol": "anthropic",
+      "provider": "qwen",
+      "base_url": "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy",
+      "version": "/v1",
+      "path_prefix": "/api/v2/apps/claude-code-proxy"
+    },
+    {
+      "host": "ark.cn-beijing.volces.com",
+      "protocol": "anthropic",
+      "provider": "doubao",
+      "base_url": "https://ark.cn-beijing.volces.com/api/coding",
+      "version": "/v1",
+      "path_prefix": "/api/coding"
+    },
+    {
+      "host": "ark.cn-beijing.volces.com",
+      "protocol": "openai_compatible",
+      "provider": "doubao",
+      "base_url": "https://ark.cn-beijing.volces.com/api/coding",
+      "version": "/v3",
+      "path_prefix": "/api/coding/v3"
+    },
+    {
+      "host": "api.mistral.ai",
+      "protocol": "openai_compatible",
+      "provider": "mistral",
+      "base_url": "https://api.mistral.ai",
+      "version": "/v1"
+    },
+    {
+      "host": "api.minimaxi.com",
+      "protocol": "openai_compatible",
+      "provider": "minimax",
+      "base_url": "https://api.minimaxi.com",
+      "version": "/v1",
+      "default": true
+    },
+    {
+      "host": "api.minimax.io",
+      "protocol": "openai_compatible",
+      "provider": "minimax",
+      "base_url": "https://api.minimax.io",
+      "version": "/v1"
+    },
+    {
+      "host": "api.minimaxi.com",
+      "protocol": "anthropic",
+      "provider": "minimax",
+      "base_url": "https://api.minimaxi.com/anthropic",
+      "version": "/v1",
+      "path_prefix": "/anthropic",
+      "default": true
+    },
+    {
+      "host": "api.minimax.io",
+      "protocol": "anthropic",
+      "provider": "minimax",
+      "base_url": "https://api.minimax.io/anthropic",
+      "version": "/v1",
+      "path_prefix": "/anthropic"
+    },
+    {
+      "host": "api.stepfun.com",
+      "protocol": "openai_compatible",
+      "provider": "stepfun",
+      "base_url": "https://api.stepfun.com",
+      "version": "/v1"
+    },
+    {
+      "host": "api.hunyuan.cloud.tencent.com",
+      "protocol": "openai_compatible",
+      "provider": "hunyuan",
+      "base_url": "https://api.hunyuan.cloud.tencent.com",
+      "version": "/v1"
+    },
+    {
+      "host": "qianfan.baidubce.com",
+      "protocol": "openai_compatible",
+      "provider": "qianfan",
+      "base_url": "https://qianfan.baidubce.com",
+      "version": "/v2"
+    },
+    {
+      "host": "api.together.ai",
+      "protocol": "openai_compatible",
+      "provider": "together",
+      "base_url": "https://api.together.ai",
+      "version": "/v1",
+      "default": true
+    },
+    {
+      "host": "api.together.xyz",
+      "protocol": "openai_compatible",
+      "provider": "together",
+      "base_url": "https://api.together.xyz",
+      "version": "/v1"
+    },
+    {
+      "host": "api.fireworks.ai",
+      "protocol": "openai_compatible",
+      "provider": "fireworks",
+      "base_url": "https://api.fireworks.ai/inference",
+      "version": "/v1"
+    },
+    {
+      "host": "api.cerebras.ai",
+      "protocol": "openai_compatible",
+      "provider": "cerebras",
+      "base_url": "https://api.cerebras.ai",
+      "version": "/v1"
+    },
+    {
+      "host": "models.github.ai",
+      "protocol": "openai_compatible",
+      "provider": "github_models",
+      "base_url": "https://models.github.ai/inference",
+      "version": ""
+    },
+    {
+      "host": "ai-gateway.vercel.sh",
+      "protocol": "openai_compatible",
+      "provider": "vercel_gateway",
+      "base_url": "https://ai-gateway.vercel.sh",
+      "version": "/v1"
+    },
+    {
+      "host": "api.z.ai",
+      "protocol": "anthropic",
+      "provider": "zhipu",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "version": "/v1",
+      "path_prefix": "/api/anthropic"
+    },
+    {
+      "host": "api.z.ai",
+      "protocol": "openai_compatible",
+      "provider": "zhipu",
+      "base_url": "https://api.z.ai/api/paas",
+      "version": "/v4",
+      "path_prefix": "/api/paas"
+    },
+    {
+      "host": "api.sambanova.ai",
+      "protocol": "openai_compatible",
+      "provider": "sambanova",
+      "base_url": "https://api.sambanova.ai",
+      "version": "/v1"
+    },
+    {
+      "host": "aihubmix.com",
+      "protocol": "openai_compatible",
+      "provider": "aihubmix",
+      "base_url": "https://aihubmix.com",
+      "version": "/v1",
+      "default": true
+    },
+    {
+      "host": "api.aihubmix.com",
+      "protocol": "openai_compatible",
+      "provider": "aihubmix",
+      "base_url": "https://api.aihubmix.com",
+      "version": "/v1"
+    },
+    {
+      "host": "api.302.ai",
+      "protocol": "openai_compatible",
+      "provider": "ai302",
+      "base_url": "https://api.302.ai",
       "version": "/v1"
     }
   ]

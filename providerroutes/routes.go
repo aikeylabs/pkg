@@ -188,6 +188,58 @@ func (t *Table) ProvidersForProtocol(protocol string) []string {
 	return out
 }
 
+// LegacyProtocolForProvider answers "which protocol did this provider speak
+// before anyone gave it a second face?" — for callers that know only the
+// provider code, typically because they are resolving a credential created
+// before protocol became a stored axis.
+//
+// # Why this is not "the first row in YAML order"
+//
+// Row order is not a routing decision anybody made; it is an editing accident.
+// The rule here is semantic instead: a credential that predates path_prefix
+// could only ever have been stored against a bare-host URL, and a bare-host URL
+// resolves to the host's EMPTY-prefix row. So the protocol of the empty-prefix
+// rows IS the face such a credential was created against. Adding a second face
+// (which always arrives with an explicit path_prefix) therefore cannot change
+// this answer — which is exactly the property legacy credentials need.
+//
+// Returns ok=false when the provider's empty-prefix rows disagree, or when it
+// has none at all (mock: every row carries an explicit prefix). Failing closed
+// there is right — such a provider never had a protocol-less era, so a
+// protocol-less credential on it is a bug to surface, not a value to guess.
+//
+// # Why it exists (2026-08-02, provider-credential-cascade)
+//
+// Before this change, callers resolved a protocol-less credential via "if the
+// provider has exactly one protocol, use it". Giving deepseek / moonshot /
+// qwen / doubao / minimax their anthropic faces made that premise false for
+// five more providers at once, and every legacy credential on them would have
+// started answering 502 `Unknown provider protocol: `. (zhipu had been multi-
+// protocol since 2026-05 and was ALREADY failing this way — this repairs that
+// too.) Widening only: it can turn a previous ok=false into a truthful answer,
+// and can never change an answer that already resolved.
+func (t *Table) LegacyProtocolForProvider(provider string) (string, bool) {
+	p := strings.ToLower(provider)
+	var found string
+	for _, r := range t.rows {
+		if strings.ToLower(r.Provider) != p || r.PathPrefix != "" {
+			continue
+		}
+		switch {
+		case found == "":
+			found = r.Protocol
+		case !strings.EqualFold(found, r.Protocol):
+			// Two bare-host faces for one provider: there is no single "before"
+			// to point at. Don't guess.
+			return "", false
+		}
+	}
+	if found == "" {
+		return "", false
+	}
+	return found, true
+}
+
 // LookupByBaseURL resolves the route row for a stored/effective base_url by
 // extracting its host and path and running the same segment-aligned
 // longest-prefix match as Lookup. Mirrors the Rust route_for_base_url so

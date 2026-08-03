@@ -65,6 +65,19 @@ type Entry struct {
 	// parenthetical (zhipu(GLM)).
 	Display      string `yaml:"display"`
 	DisplayAlias string `yaml:"display_alias"`
+	// Picker reports whether this provider appears in normal API-key pickers.
+	//
+	// Modelled here as of 2026-08-02 (provider-credential-cascade) because Go
+	// finally has a consumer: the I-7 fence derives "the protocols the console
+	// can offer" as the protocols of route rows whose provider is picker-visible,
+	// and then asserts every one of them resolves to a forwarding adapter. That
+	// derivation is what lets R-8 hide google (picker: false) and have `gemini`
+	// drop out of the offered set automatically — no hand-written exclusion list
+	// that keeps passing after somebody flips the flag back.
+	//
+	// 🚫 Not a routing input. It governs VISIBILITY only; a picker:false provider
+	// (mock, google) still routes normally for credentials that already exist.
+	Picker bool `yaml:"picker"`
 }
 
 // Registry is an immutable parsed view of provider_registry.yaml.
