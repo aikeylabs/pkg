@@ -41,8 +41,8 @@
     "provider": "doubao",
     "protocol": "openai_compatible",
     "stored_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
-    "client_path": "/v3/chat/completions",
-    "old_proxy_upstream": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+    "client_path": "/v1/chat/completions",
+    "old_proxy_upstream": "https://ark.cn-beijing.volces.com/api/v3/v1/chat/completions",
     "new_proxy_upstream": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
     "old_route_known": true,
     "shape": "A · SILENT mis-route — the fallback row matched, the path segment was discarded, and NO WARN fires"
@@ -293,8 +293,8 @@
     "provider": "zhipu",
     "protocol": "openai_compatible",
     "stored_base_url": "https://api.z.ai/api/paas/v4",
-    "client_path": "/v4/chat/completions",
-    "old_proxy_upstream": "https://api.z.ai/api/paas/v4/v4/chat/completions",
+    "client_path": "/v1/chat/completions",
+    "old_proxy_upstream": "https://api.z.ai/api/paas/v4/v1/chat/completions",
     "new_proxy_upstream": "https://api.z.ai/api/paas/v4/chat/completions",
     "old_route_known": false,
     "shape": "B · /v1/v1 duplicate version segment — 404, WARN proxy.route.not_found IS emitted"
@@ -305,8 +305,8 @@
     "provider": "qianfan",
     "protocol": "openai_compatible",
     "stored_base_url": "https://qianfan.baidubce.com/v2",
-    "client_path": "/v2/chat/completions",
-    "old_proxy_upstream": "https://qianfan.baidubce.com/v2/v2/chat/completions",
+    "client_path": "/v1/chat/completions",
+    "old_proxy_upstream": "https://qianfan.baidubce.com/v2/v1/chat/completions",
     "new_proxy_upstream": "https://qianfan.baidubce.com/v2/chat/completions",
     "old_route_known": false,
     "shape": "B · /v1/v1 duplicate version segment — 404, WARN proxy.route.not_found IS emitted"

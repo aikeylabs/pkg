@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,7 +36,7 @@ import (
 // URL resolves to ITSELF". Two pre-existing rows are alias rows whose base_url
 // deliberately points at a DIFFERENT host (www.kimi.com → api.kimi.com,
 // platform.moonshot.cn → api.moonshot.cn), so a self-hit assertion would fail
-// on real, intended behaviour on its very first run — and would then get
+// on real, intended behavior on its very first run — and would then get
 // "fixed" into a whitelist exception, which is how fences die. See
 // baseline-routes.md for the round-trip table this fixture came from.
 func TestFence_I3_BaselineRoutesUnchanged(t *testing.T) {
@@ -472,12 +473,12 @@ func TestFence_HostMatchesBaseURL(t *testing.T) {
 // mixedVersionRow is one row whose upstream differs between the pre-cascade
 // table (an un-upgraded worker's embedded copy) and the post-cascade table.
 type mixedVersionRow struct {
-	Host       string `json:"host"`
-	PathPrefix string `json:"path_prefix"`
-	Provider   string `json:"provider"`
-	Protocol   string `json:"protocol"`
-	StoredURL  string `json:"stored_base_url"`
-	ClientPath string `json:"client_path"`
+	Host        string `json:"host"`
+	PathPrefix  string `json:"path_prefix"`
+	Provider    string `json:"provider"`
+	Protocol    string `json:"protocol"`
+	StoredURL   string `json:"stored_base_url"`
+	ClientPath  string `json:"client_path"`
 	OldUpstream string `json:"old_proxy_upstream"`
 	NewUpstream string `json:"new_proxy_upstream"`
 	// OldRouteKnown records whether the OLD table matched a row at all. This is
@@ -511,7 +512,8 @@ func TestFence_I11_MixedVersionDiffIsEnumerated(t *testing.T) {
 		}
 		stored := EffectiveUpstream(r)
 		clientPath := clientPathFor(r.Protocol, r.Version)
-		oldUp := stitchWith(t, oldTbl, stored, clientPath)
+		// old worker = old table AND old code; see stitchOldRule.
+		oldUp := stitchOldRule(oldTbl, stored, clientPath)
 		newUp := stitchWith(t, newTbl, stored, clientPath)
 		if oldUp == newUp {
 			continue // an un-upgraded worker behaves identically; nothing to report
@@ -575,12 +577,58 @@ func TestFence_I11_MixedVersionDiffIsEnumerated(t *testing.T) {
 // Both real client shapes converge under Stitch's one rule (the version is
 // stripped once and re-attached once), so exercising the with-version shape
 // also covers the without-version one.
-func clientPathFor(protocol, version string) string {
-	endpoint := "/chat/completions"
+// clientPathFor is what a REAL SDK sends after the proxy strips the
+// "/<provider>" routing prefix.
+//
+// 🔴 2026-08-03: this used to return `version + endpoint` — i.e. it simulated a
+// client that sends whatever version the ROW declares. No client does that.
+// OpenAI-compatible SDKs send /v1/chat/completions and Anthropic SDKs send
+// /v1/messages regardless of which version the upstream serves. Feeding the
+// row's own version in made the simulated old-worker URL byte-match the row's
+// version and get stripped, which is exactly how three rows of
+// mixed-version-affected-rows.md came to state a destination no real worker
+// ever produces. Measured against a real alpha.15 worker on staging, the
+// corrected values below match reality on all 26 rows.
+func clientPathFor(protocol, _ string) string {
 	if protocol == "anthropic" {
-		endpoint = "/messages"
+		return "/v1/messages"
 	}
-	return version + endpoint
+	return "/v1/chat/completions"
+}
+
+// stitchOldRule reproduces the PRE-2026-08-03 stitch: the version segment was
+// stripped from the client path only when it was BYTE-EQUAL to the row's own
+// version.
+//
+// 🔴 Why this frozen copy has to exist. The fence answers "what does an
+// un-upgraded worker do", and an un-upgraded worker runs the old TABLE *and*
+// the old CODE. Computing the old column with the current stitch silently
+// assumed the algorithm never changes; when it did, the fence started
+// reporting a destination that no deployed binary produces — and, worse,
+// pointed at the manifest as the thing to "correct". The manifest feeds
+// release notes, so that direction of error tells customers something false.
+// 🚫 Do not "simplify" this back to tbl.Stitch.
+func stitchOldRule(tbl *Table, storedBaseURL, clientPath string) string {
+	u, err := url.Parse(storedBaseURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	basePath, version := strings.TrimRight(u.Path, "/"), ""
+	if r, ok := tbl.Lookup(strings.ToLower(u.Host), u.Path); ok {
+		if bu, err := url.Parse(r.BaseURL); err == nil {
+			basePath, version = strings.TrimRight(bu.Path, "/"), r.Version
+		}
+	}
+	reqPath := clientPath
+	if version != "" {
+		switch {
+		case strings.HasPrefix(reqPath, version+"/"):
+			reqPath = strings.TrimPrefix(reqPath, version)
+		case reqPath == version:
+			reqPath = ""
+		}
+	}
+	return u.Scheme + "://" + u.Host + basePath + version + reqPath
 }
 
 func stitchWith(t *testing.T, tbl *Table, storedBaseURL, clientPath string) string {
