@@ -50,7 +50,7 @@ func (t *Table) Stitch(req *http.Request, vaultBaseURL string) error {
 //
 // This is intentionally explicit instead of guessing from an unknown host or
 // path suffix: a private third-party gateway must retain Stitch's degraded
-// literal-prepend behaviour, while a resident provider whose address changes
+// literal-prepend behavior, while a resident provider whose address changes
 // between host and cluster rails still needs deterministic version handling.
 func (t *Table) StitchForProviderProtocol(req *http.Request, runtimeBaseURL, provider, protocol string) error {
 	target, err := url.Parse(runtimeBaseURL)
@@ -80,11 +80,38 @@ func stitchRequestURL(req *http.Request, target *url.URL, basePath, version stri
 	req.Host = target.Host
 	reqPath := req.URL.Path
 	if version != "" {
+		// Strip whatever version segment the CLIENT sent, not only one that
+		// happens to equal ours. The row's version is authoritative — that is
+		// what this function's own doc comment already promises ("reqPath with
+		// leading version stripped if present").
+		//
+		// 🔴 2026-08-03: this used to strip only on byte-equality with
+		// `version`. An openai-compatible client always sends
+		// /v1/chat/completions, so every row whose version was NOT "/v1" kept
+		// both segments and dialled e.g.
+		//   https://ark.cn-beijing.volces.com/api/v3/v1/chat/completions
+		// Invisible on the 23 rows whose version already is "/v1" (identical
+		// either way), which is why it survived: the I-2 fence asserts the URL
+		// resolves to the row that PRODUCED it — classification, not stitching.
+		// Found on real staging traffic (qianfan returned 404 for exactly this).
+		//
+		// Rows with NO version keep today's behavior untouched: they never
+		// re-attach anything, so stripping the client's segment would silently
+		// change three endpoints nobody has verified against their vendor.
+		//
+		// The two branches are a UNION, not a replacement. Byte-equality still
+		// comes first because it is the only thing that can strip a NON-numeric
+		// version such as gemini's `/v1beta`
+		// (TestStitchContract/gemini_v1beta_client_sends_it). The numeric rule
+		// then covers the case byte-equality misses: client sent /v1, row
+		// declares /v3.
 		switch {
 		case strings.HasPrefix(reqPath, version+"/"):
 			reqPath = strings.TrimPrefix(reqPath, version)
 		case reqPath == version:
 			reqPath = ""
+		default:
+			reqPath = trimLeadingVersionSegment(reqPath)
 		}
 	}
 
@@ -96,6 +123,38 @@ func stitchRequestURL(req *http.Request, target *url.URL, basePath, version stri
 	if req.URL.RawPath != "" {
 		req.URL.RawPath = stitched
 	}
+}
+
+// trimLeadingVersionSegment removes a leading API-version path segment
+// ("/v1", "/v2", "/v4") and returns the rest. Anything else is returned
+// untouched.
+//
+// 🔴 The segment must be "v" followed by DIGITS ONLY. Not a loose
+// "starts with v and a digit" test: `TestStitchContract/openai_v1abc_not_swallowed`
+// pins that `/v1abc/x` is a real path segment and must survive, and the
+// gemini row's `/v1beta/models/x` likewise. Swallowing a segment that merely
+// looks version-ish would be a silent mis-route of exactly the kind this
+// function was just fixed for — narrower is correct here.
+//
+// Deliberately hand-rolled rather than a regexp — this runs on every
+// forwarded request.
+func trimLeadingVersionSegment(p string) string {
+	if !strings.HasPrefix(p, "/v") {
+		return p
+	}
+	seg := p[1:]
+	if i := strings.IndexByte(seg, '/'); i >= 0 {
+		seg = seg[:i]
+	}
+	if len(seg) < 2 {
+		return p
+	}
+	for i := 1; i < len(seg); i++ {
+		if c := seg[i]; c < '0' || c > '9' {
+			return p // "/version", "/v1abc", "/v1beta", …
+		}
+	}
+	return p[len(seg)+1:]
 }
 
 // PathDiscarded reports whether resolving storedBaseURL through this table
@@ -173,7 +232,7 @@ func rowDiscardsPath(row Route, storedPath string) bool {
 // path with empty version when not (degraded mode).
 //
 // 🔴 R-9 note: when the matched row satisfies rowDiscardsPath, part of the
-// stored path is dropped here. That is the PRE-EXISTING behaviour and this
+// stored path is dropped here. That is the PRE-EXISTING behavior and this
 // change does not alter it — Table.PathDiscarded exists purely so the caller
 // can say so in the log. Changing the return in that branch would change
 // forwarding, which R-9 explicitly rules out.
@@ -196,7 +255,7 @@ func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, vers
 	}
 	// Fallback: literal-prepend the user's stored path, no version
 	// re-attach. Hosts not yet in yaml table still route, just without
-	// dedup. This is the correct degraded behaviour — fail open with a
+	// dedup. This is the correct degraded behavior — fail open with a
 	// best-effort path stitch rather than blocking a request that might
 	// well work upstream.
 	return strings.TrimRight(parsedPath, "/"), ""
