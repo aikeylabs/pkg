@@ -84,50 +84,111 @@ func TestFence_StitchedPathCarriesExactlyOneVersionSegment(t *testing.T) {
 		checked, skippedNoDefault)
 }
 
-// TestFence_UnversionedRowsAreEnumerated makes the carve-out VISIBLE.
+// TestFence_UnversionedRowsAreEnumerated keeps the version:"" rows VISIBLE, and
+// now also pins what they DO.
 //
-// Rows with version "" pass the client's own /v1 straight through. This test
-// deliberately asserts NOTHING about correctness — it fails only if the SET
-// changes, forcing whoever adds or removes an unversioned row to look at it.
-// 🚫 Do not "fix" this by deleting it; that would return the rows to silence.
+// # What the 2026-08-03 §6 route-table health check settled
 //
-// 2026-08-03, unauthenticated probe results (401/403 = endpoint exists and
-// wants auth; 404 = wrong path):
+// The table carried three unversioned rows. All three were unverified, and when
+// probed (401/403 = the endpoint exists and wants auth; 404 = wrong path;
+// 410 = gone) all three turned out to be broken, each differently:
 //
-//   - zhipu open.bigmodel.cn/api/paas — 🔴 LOOKS WRONG, not fixed here.
-//     /api/paas/v4/chat/completions → 401, modern envelope
-//     {"error":{"code":"1001",…}}
-//     /api/paas/v1/chat/completions → HTTP **200**, LEGACY envelope
-//     {"code":1001,"msg":…,"success":false}
-//     Both are live, so nothing 404s to warn anyone. With version "" an
-//     OpenAI-compatible client is sent to the LEGACY v1 API, which answers an
-//     auth failure with 200 and a body carrying no `choices` — the client
-//     parses a success that is not one. Its z.ai sibling declares /v4.
-//     🚫 Deliberately NOT changed: this is a PRE-EXISTING row (baseline 15)
-//     and setting a version re-points every zhipu credential already stored
-//     against it. That is a product decision, not a test fixup.
-//   - perplexity    — NOT DETERMINED. api.perplexity.ai was unreachable from
-//     the probing host (connect timeout), so neither path could be compared.
-//   - github_models — NOT DETERMINED. BOTH candidate paths returned 410 Gone,
-//     which says the endpoint family moved rather than which path is right.
+//   - perplexity — /chat/completions → 401, /v1/chat/completions → 404. The row
+//     was RIGHT and the STITCH was wrong: with version "" the client's own /v1
+//     was forwarded, so the proxy dialled the 404 path. Fixed in stitch.go by
+//     making the strip unconditional for a known row. (The first-round report
+//     called this host "unreachable"; that was a probing error — the host has
+//     HTTPS_PROXY set and the probe passed curl --noproxy '*', a rule that is
+//     right for the runbook's localhost probes and wrong for vendor probes.)
+//   - zhipu open.bigmodel.cn/api/paas — /api/paas/v4/… → 401 with the modern
+//     envelope {"error":{"code":"1001",…}}; /api/paas/v1/… → HTTP **200** with
+//     the LEGACY envelope {"code":1001,…,"success":false}. Both live, so nothing
+//     404s to warn anyone, and an auth failure arrives as a 200 with no
+//     `choices` — the client parses a success that is not one. Row data, not
+//     stitch: fixed in the yaml as version "/v4". The upgrade consequence is
+//     asserted in cascade_fences_test.go's intentionalRowChanges.
+//   - github_models — both candidate paths → 410
+//     {"error":{"code":"github_models_retirement_brownout",…}}. The vendor is
+//     retiring the Models API; no stitch or row edit reaches it. Row and
+//     registry identity deleted.
+//
+// So perplexity is the only unversioned row left, and "unversioned" now means
+// exactly one thing: this vendor serves no version segment, and the client's
+// own is stripped like everyone else's. 🚫 Do not weaken this back into a bare
+// set-membership check — the assertion that the row STRIPS is the half that
+// would have caught the defect.
 func TestFence_UnversionedRowsAreEnumerated(t *testing.T) {
-	known := map[string]bool{
-		"perplexity|openai_compatible|https://api.perplexity.ai":             true,
-		"zhipu|openai_compatible|https://open.bigmodel.cn/api/paas":          true,
-		"github_models|openai_compatible|https://models.github.ai/inference": true,
+	// key → the path the proxy must dial when an OpenAI-compatible client sends
+	// its customary /v1/chat/completions.
+	known := map[string]string{
+		"perplexity|openai_compatible|https://api.perplexity.ai": "/chat/completions",
 	}
 	seen := map[string]bool{}
 	for _, r := range tblAllUnversioned(Default()) {
 		key := r.Provider + "|" + r.Protocol + "|" + EffectiveUpstream(r)
 		seen[key] = true
-		if !known[key] {
-			t.Errorf("NEW unversioned row %q. It will forward the client's own version segment "+
-				"verbatim. Confirm against the vendor's documented path before shipping, then add it here.", key)
+		wantPath, listed := known[key]
+		if !listed {
+			t.Errorf("NEW unversioned row %q. Confirm against the vendor's documented path "+
+				"before shipping — an empty version means \"this vendor has no version segment\", "+
+				"NOT \"pass the client's segment through\" — then add it here with the path it must dial.", key)
+			continue
+		}
+
+		clientPath, ok := canonicalClientPath[r.Protocol]
+		if !ok {
+			continue
+		}
+		req := &http.Request{URL: &url.URL{Path: clientPath}}
+		if err := Default().Stitch(req, EffectiveUpstream(r)); err != nil {
+			t.Errorf("%s: Stitch failed: %v", key, err)
+			continue
+		}
+		if req.URL.Path != wantPath {
+			t.Errorf("🔴 %s: client sent %s, the proxy would dial %q, want %q.\n"+
+				"  A row with no version must still STRIP the client's segment. Forwarding it "+
+				"verbatim is what sent perplexity traffic to a 404 while its declared endpoint answered 401.",
+				key, clientPath, req.URL.Path, wantPath)
 		}
 	}
 	for key := range known {
 		if !seen[key] {
 			t.Errorf("unversioned row %q disappeared — if it was fixed or removed, drop it from `known`.", key)
+		}
+	}
+}
+
+// TestFence_UnknownHostStillForwardsTheClientVersion is the other half of the
+// unconditional strip: it must NOT reach hosts the table has never heard of.
+//
+// 🔴 Why this needs its own fence. The natural way to implement "strip
+// unconditionally" is to delete the `if version != ""` guard, and the degraded
+// literal-prepend branch also produces version "" — so the one-line version of
+// the fix silently swallows the /v1 of every private gateway and enterprise
+// reverse proxy that is not in the yaml. Those are precisely the deployments
+// with no test coverage and no way to notice except a customer's 404.
+func TestFence_UnknownHostStillForwardsTheClientVersion(t *testing.T) {
+	tbl := Default()
+	if _, ok := tbl.ByHost("gw.private.example"); ok {
+		t.Fatal("the fence's host is supposed to be ABSENT from the table")
+	}
+	cases := []struct{ stored, clientPath, want string }{
+		// The shape that breaks: nothing in the stored URL supplies a version,
+		// so the client's own segment is the only one there is.
+		{"https://gw.private.example", "/v1/chat/completions", "/v1/chat/completions"},
+		// And the pre-existing literal-prepend behavior, unchanged.
+		{"https://gw.private.example/api/v9", "/foo", "/api/v9/foo"},
+	}
+	for _, c := range cases {
+		req := &http.Request{URL: &url.URL{Path: c.clientPath}}
+		if err := tbl.Stitch(req, c.stored); err != nil {
+			t.Fatalf("Stitch(%q): %v", c.stored, err)
+		}
+		if req.URL.Path != c.want {
+			t.Errorf("unknown host %q + client path %q → %q, want %q.\n"+
+				"  The table knows nothing about this vendor's shape; deciding its version segment "+
+				"for it is not the same act as deciding one for a vendor we have a row for.",
+				c.stored, c.clientPath, req.URL.Path, c.want)
 		}
 	}
 }
@@ -155,14 +216,28 @@ func TestFence_UnversionedRowsAreEnumerated(t *testing.T) {
 //
 // This test asserts the CURRENT divergent set. When #11 (or its successor)
 // lands, this test fails — which is the point: come back and delete it.
+//
+// # 2026-08-03: the set is now EMPTY, and the defect is NOT fixed
+//
+// Both entries were zhipu openai rows, and they diverged only because zhipu's
+// DEFAULT row (the empty-prefix /api/paas one) declared no version, so
+// StitchForProviderProtocol had nothing to strip. Giving that row its correct
+// /v4 made all three zhipu openai rows version-uniform, and the mismatch
+// vanished — by arithmetic, not by repair. StitchForProviderProtocol still
+// applies the PAIR'S DEFAULT row's version to a base URL that may belong to a
+// different row; the table simply no longer contains a pair where that is
+// observable.
+//
+// 🚫 So do NOT read an empty set as "#11 landed", and do not delete this test.
+// It is now a regression fence: the next multi-row provider whose default row
+// disagrees with a sibling reds here, on the day the row is added rather than
+// on the day a customer's OAuth credential 404s.
 func TestFence_OAuthPathVersionDivergenceIsKnown(t *testing.T) {
 	tbl := Default()
-	knownDivergent := map[string]bool{
-		"zhipu|openai_compatible|https://open.bigmodel.cn/api/coding/paas/v4": true,
-		"zhipu|openai_compatible|https://api.z.ai/api/paas/v4":                true,
-	}
+	knownDivergent := map[string]bool{}
 	seen := map[string]bool{}
 
+	checked := 0
 	for _, r := range tbl.All() {
 		clientPath, ok := canonicalClientPath[r.Protocol]
 		if !ok || r.Version == "" {
@@ -173,6 +248,7 @@ func TestFence_OAuthPathVersionDivergenceIsKnown(t *testing.T) {
 		if err := tbl.StitchForProviderProtocol(req, upstream, r.Provider, r.Protocol); err != nil {
 			continue
 		}
+		checked++
 		u, err := url.Parse(upstream)
 		if err != nil {
 			continue
@@ -195,7 +271,13 @@ func TestFence_OAuthPathVersionDivergenceIsKnown(t *testing.T) {
 				"(e.g. aikey-proxy#11 landed), delete it from knownDivergent.", key)
 		}
 	}
-	t.Logf("OAuth-path divergence still present on %d row(s); tracked, not fixed here", len(seen))
+	// An empty `seen` is the expected answer today, so this fence can only be
+	// trusted if it actually drove rows through the OAuth stitch. Zero exercised
+	// rows would report "no divergence" for the wrong reason.
+	if checked == 0 {
+		t.Fatal("anti-vacuous: StitchForProviderProtocol was never exercised — 'no divergence' here would mean 'nothing was tried'")
+	}
+	t.Logf("OAuth-path divergence present on %d of %d exercised row(s); the defect is unobserved in this table, not repaired", len(seen), checked)
 }
 
 func tblAllUnversioned(tbl *Table) []Route {

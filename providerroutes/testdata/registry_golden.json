@@ -131,7 +131,7 @@
       "protocol": "openai_compatible",
       "provider": "zhipu",
       "base_url": "https://open.bigmodel.cn/api/paas",
-      "version": ""
+      "version": "/v4"
     },
     {
       "host": "open.bigmodel.cn",
@@ -336,13 +336,6 @@
       "provider": "cerebras",
       "base_url": "https://api.cerebras.ai",
       "version": "/v1"
-    },
-    {
-      "host": "models.github.ai",
-      "protocol": "openai_compatible",
-      "provider": "github_models",
-      "base_url": "https://models.github.ai/inference",
-      "version": ""
     },
     {
       "host": "ai-gateway.vercel.sh",

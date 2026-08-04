@@ -20,7 +20,9 @@ import (
 //     table's (base_url, version) as the canonical upstream prefix and
 //     strip-then-re-attach the version segment from reqPath. Single
 //     mathematical rule: final = base_url + version + (reqPath with
-//     leading version stripped if present).
+//     leading version stripped if present). The strip does not depend on
+//     the row declaring a version — a row with version "" re-attaches
+//     nothing, and still strips (perplexity).
 //   - If vaultBaseURL parses but its host is NOT in the table →
 //     degraded literal-prepend (base_url path + reqPath). Third-party
 //     gateways absent from yaml still flow; expected fix is to add
@@ -38,8 +40,8 @@ func (t *Table) Stitch(req *http.Request, vaultBaseURL string) error {
 	if err != nil {
 		return fmt.Errorf("providerroutes: parse base_url: %w", err)
 	}
-	basePath, version := t.resolveStitchComponents(target.Host, target.Path)
-	stitchRequestURL(req, target, basePath, version)
+	basePath, version, known := t.resolveStitchComponents(target.Host, target.Path)
+	stitchRequestURL(req, target, basePath, version, known)
 	return nil
 }
 
@@ -69,17 +71,26 @@ func (t *Table) StitchForProviderProtocol(req *http.Request, runtimeBaseURL, pro
 	if route.Version != "" {
 		basePath = strings.TrimSuffix(basePath, route.Version)
 	}
-	stitchRequestURL(req, target, basePath, route.Version)
+	// A row was resolved out of the table, so the table's answer is
+	// authoritative and the client's own version segment is stripped — exactly
+	// as on the Stitch path. `true` even when route.Version is "": see the
+	// `rowKnown` note in stitchRequestURL.
+	stitchRequestURL(req, target, basePath, route.Version, true)
 	return nil
 }
 
-func stitchRequestURL(req *http.Request, target *url.URL, basePath, version string) {
+// stitchRequestURL builds the final path. rowKnown says whether basePath/version
+// came from a TABLE ROW (true) or from the degraded literal-prepend fallback for
+// a host the table has never heard of (false). It is the discriminator for
+// whether the client's own version segment may be stripped — see the long note
+// below.
+func stitchRequestURL(req *http.Request, target *url.URL, basePath, version string, rowKnown bool) {
 
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
 	req.Host = target.Host
 	reqPath := req.URL.Path
-	if version != "" {
+	if rowKnown {
 		// Strip whatever version segment the CLIENT sent, not only one that
 		// happens to equal ours. The row's version is authoritative — that is
 		// what this function's own doc comment already promises ("reqPath with
@@ -95,20 +106,40 @@ func stitchRequestURL(req *http.Request, target *url.URL, basePath, version stri
 		// resolves to the row that PRODUCED it — classification, not stitching.
 		// Found on real staging traffic (qianfan returned 404 for exactly this).
 		//
-		// Rows with NO version keep today's behavior untouched: they never
-		// re-attach anything, so stripping the client's segment would silently
-		// change three endpoints nobody has verified against their vendor.
+		// 🔴 2026-08-03, second pass: the strip is now UNCONDITIONAL for a
+		// known row, `version: ""` included. The first pass deliberately left
+		// unversioned rows alone because none of the three had been checked
+		// against its vendor; the §6 route-table health check then settled all
+		// three, and the carve-out turned out to be wrong exactly where it was
+		// supposed to be safe:
+		//   perplexity     — its declared /chat/completions answers 401, and
+		//                    /v1/chat/completions (what the carve-out dialled)
+		//                    answers 404. A real mis-route, not "unverified".
+		//   zhipu /api/paas — a row-data defect, fixed in the yaml (version /v4).
+		//   github_models   — vendor retired the endpoint (410); row deleted.
+		// So an empty version means "this vendor has no version segment",
+		// never "pass the client's segment through". A row that wants the
+		// client's segment forwarded verbatim cannot be expressed, and no
+		// vendor in the table needs it.
 		//
-		// The two branches are a UNION, not a replacement. Byte-equality still
+		// 🚫 The DEGRADED path (rowKnown=false, an unknown host taking the
+		// literal-prepend branch) is untouched on purpose. There the table
+		// knows nothing about the vendor's shape, the stored base_url is all
+		// there is, and a private gateway stored as https://gw.example serving
+		// /v1/chat/completions would break the moment we swallowed its /v1.
+		// Deciding for a vendor we know is not the same act as deciding for one
+		// we do not.
+		//
+		// The branches are a UNION, not a replacement. Byte-equality still
 		// comes first because it is the only thing that can strip a NON-numeric
 		// version such as gemini's `/v1beta`
 		// (TestStitchContract/gemini_v1beta_client_sends_it). The numeric rule
-		// then covers the case byte-equality misses: client sent /v1, row
-		// declares /v3.
+		// then covers the cases byte-equality misses: client sent /v1 where the
+		// row declares /v3, and client sent /v1 where the row declares nothing.
 		switch {
-		case strings.HasPrefix(reqPath, version+"/"):
+		case version != "" && strings.HasPrefix(reqPath, version+"/"):
 			reqPath = strings.TrimPrefix(reqPath, version)
-		case reqPath == version:
+		case version != "" && reqPath == version:
 			reqPath = ""
 		default:
 			reqPath = trimLeadingVersionSegment(reqPath)
@@ -236,7 +267,12 @@ func rowDiscardsPath(row Route, storedPath string) bool {
 // change does not alter it — Table.PathDiscarded exists purely so the caller
 // can say so in the log. Changing the return in that branch would change
 // forwarding, which R-9 explicitly rules out.
-func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, version string) {
+//
+// The third return says whether a ROW answered. Callers need it because the two
+// branches below can both produce version "" and they mean opposite things: a
+// row with no version is a vendor we know serves an unversioned path, while the
+// fallback's "" is "we know nothing about this host at all".
+func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, version string, rowKnown bool) {
 	host = strings.ToLower(host)
 	// P1b (design D-2b): key by (host, path_prefix). The stored base_url's
 	// path segment (parsedPath) selects among a host's rows via
@@ -250,7 +286,7 @@ func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, vers
 		// across users with different vault states (some stored the URL
 		// with /v1, some without).
 		if u, err := url.Parse(r.BaseURL); err == nil {
-			return strings.TrimRight(u.Path, "/"), r.Version
+			return strings.TrimRight(u.Path, "/"), r.Version, true
 		}
 	}
 	// Fallback: literal-prepend the user's stored path, no version
@@ -258,5 +294,5 @@ func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, vers
 	// dedup. This is the correct degraded behavior — fail open with a
 	// best-effort path stitch rather than blocking a request that might
 	// well work upstream.
-	return strings.TrimRight(parsedPath, "/"), ""
+	return strings.TrimRight(parsedPath, "/"), "", false
 }
