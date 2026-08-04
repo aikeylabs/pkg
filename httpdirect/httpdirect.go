@@ -95,7 +95,17 @@ func SetProxyOverride(rawURL string) error {
 	}
 	u, err := url.Parse(s)
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrInvalidProxyURL, err)
+		// 🔴 NEVER embed the raw spec (or url.Error, which carries it) in the
+		// message: a proxy URL legitimately holds credentials
+		// (http://user:pass@host:3128), and this error is logged by every
+		// caller on a failed boot. Report only the parser's reason, which
+		// describes the syntax problem without quoting the input.
+		reason := "not a valid URL"
+		var uerr *url.Error
+		if errors.As(err, &uerr) && uerr.Err != nil {
+			reason = uerr.Err.Error()
+		}
+		return fmt.Errorf("%w: %s", ErrInvalidProxyURL, reason)
 	}
 	switch u.Scheme {
 	case "http", "https", "socks5":
@@ -107,6 +117,25 @@ func SetProxyOverride(rawURL string) error {
 	}
 	override.Store(u)
 	return nil
+}
+
+// Redact renders a proxy spec safe to log: credentials are replaced, and an
+// unparseable spec degrades to a fixed placeholder rather than echoing input.
+//
+// Callers that report a REJECTED spec must use this. The rejected path is
+// exactly where the raw value is most tempting to print ("show the operator
+// what they typed") and most dangerous to print (it was typed wrong, but the
+// password in it is usually right).
+func Redact(rawURL string) string {
+	s := strings.TrimSpace(rawURL)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return "(unparseable)"
+	}
+	return u.Redacted()
 }
 
 // ProxyOverride reports the configured control-plane proxy, or "" when

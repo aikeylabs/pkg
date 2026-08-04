@@ -50,6 +50,47 @@ func BuildDialer(spec string) (xproxy.Dialer, error) {
 	return nil, fmt.Errorf("no egress engine handles this proxy spec: multi-protocol egress (ss/vmess/trojan/…) requires the offline enterprise package; this build supports socks5 chains only")
 }
 
+// Validator is an OPTIONAL interface an engine may implement to answer "is this
+// spec valid?" WITHOUT building a live dialer — no network, no background
+// goroutines. Engines that do not implement it fall back to the shape check.
+//
+// WHY IT IS SEPARATE FROM Build (2026-07-30): the admin console validates at
+// SAVE time. Building a multi-protocol fragment primes each proxy-group's health
+// check, which is a real network probe — so a build-based save-time validation
+// would reject a perfectly valid config whenever the control plane's network
+// hiccups. Validity and reachability are different questions; reachability has
+// its own affordance (the 测试 button).
+type Validator interface {
+	Validate(spec string) error
+}
+
+// ValidateDeep runs the strongest validation this build can offer for spec:
+// shape first, then the claiming engine's semantic check when it provides one.
+//
+// It is what a SETTER should call so an invalid spec is refused at write time
+// rather than surfacing later as a request-time 503 the operator has to trace
+// back to a config they believe is saved and working ("失败要显眼").
+//
+// Graceful degradation is deliberate: a build without the multi-protocol engine
+// has no semantic checker for fragments, so it returns the shape verdict rather
+// than refusing everything it cannot deeply verify.
+func ValidateDeep(spec string) error {
+	s := strings.TrimSpace(spec)
+	if err := ValidateSpec(s); err != nil {
+		return err
+	}
+	for _, e := range engines {
+		if !e.Claims(s) {
+			continue
+		}
+		if v, ok := e.(Validator); ok {
+			return v.Validate(s)
+		}
+		return nil // engine has no deep checker; shape verdict stands
+	}
+	return fmt.Errorf("no egress engine handles this proxy spec: multi-protocol egress (ss/vmess/trojan/…) requires the offline enterprise package; this build supports socks5 chains only")
+}
+
 // Names returns the registered engine names, for diagnostics / health surfaces.
 func Names() []string {
 	out := make([]string, 0, len(engines))
@@ -107,7 +148,13 @@ func IsEngineSpec(spec string) bool {
 func isFragment(s string) bool {
 	return strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") ||
 		strings.HasPrefix(s, "-") || strings.HasPrefix(s, "proxies:") ||
-		strings.HasPrefix(s, "proxy-groups:")
+		strings.HasPrefix(s, "proxy-groups:") ||
+		// `rules:` (2026-07-30 DIRECT-bypass lists) is a fragment key like the
+		// others — the leading key follows the operator's authoring order. Missing
+		// it here made a rules-first fragment fall through to the socks5-chain
+		// validator, so an OSS user got "each hop must be socks5" instead of the
+		// actionable "this needs the enterprise offline package".
+		strings.HasPrefix(s, "rules:")
 }
 
 // IsFragment reports whether a trimmed spec is a multi-protocol config fragment
@@ -122,7 +169,7 @@ func IsFragment(spec string) bool { return isFragment(strings.TrimSpace(spec)) }
 // /user/settings node-level upstream and the per-account editor accept the same
 // forms (config alignment):
 //
-//   - config fragment (starts with {, [, -, proxies:, proxy-groups:) →
+//   - config fragment (starts with {, [, -, proxies:, proxy-groups:, rules:) →
 //     shape-accept; deep validation happens in the mihomo engine at Build.
 //   - socks5 chain → every comma hop must be socks5://host:port; ≥1 hop.
 //

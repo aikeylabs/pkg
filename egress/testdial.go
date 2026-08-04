@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -35,6 +36,28 @@ type TestResult struct {
 	LatencyMs int64
 	// StatusCode is the echo endpoint's HTTP status.
 	StatusCode int
+	// Bypassed reports that the ECHO TARGET ITSELF matched a DIRECT bypass rule
+	// in the spec, so this probe never went through the proxy — ExitIP is then
+	// the PROBING HOST's own IP, not the egress exit.
+	//
+	// WHY THIS FIELD EXISTS (2026-07-30): without it a bypass-ruled echo target
+	// produces a green result showing a plausible IP, and an operator reads
+	// "egress verified" from a probe that proved nothing about the egress. A
+	// connectivity check that can silently measure the wrong path is worse than
+	// no check. Always false for specs with no bypass rules.
+	Bypassed bool
+	// BypassRule is the rule line that matched, for the UI to quote verbatim.
+	BypassRule string
+}
+
+// BypassReporter is an OPTIONAL interface a built dialer may implement to say
+// whether a given address would skip the proxy. Engines that route everything
+// through the chain simply do not implement it (the zero behavior is "nothing
+// is bypassed"), so this is additive — the Engine contract is unchanged.
+type BypassReporter interface {
+	// BypassInfo reports whether addr (host:port) is routed DIRECT, and which
+	// rule decided it.
+	BypassInfo(addr string) (bypassed bool, rule string)
 }
 
 // TestDial resolves spec through the engine registry, dials echoURL through it,
@@ -87,13 +110,42 @@ func TestDial(ctx context.Context, spec, echoURL string, timeout time.Duration) 
 	elapsed := time.Since(start).Milliseconds()
 
 	trimmed := strings.TrimSpace(string(body))
-	return &TestResult{
+	res := &TestResult{
 		Engine:     engineName,
 		ExitIP:     extractIP(trimmed),
 		Body:       trimmed,
 		LatencyMs:  elapsed,
 		StatusCode: resp.StatusCode,
-	}, nil
+	}
+	// Did the probe actually traverse the proxy? Ask the dialer about the echo
+	// target itself; a DIRECT verdict means ExitIP describes this host, not the
+	// egress (see TestResult.Bypassed).
+	if br, ok := dialer.(BypassReporter); ok {
+		if host := echoHostPort(echoURL); host != "" {
+			res.Bypassed, res.BypassRule = br.BypassInfo(host)
+		}
+	}
+	return res, nil
+}
+
+// echoHostPort renders echoURL as the host:port the transport would dial,
+// filling in the scheme's default port (url.Host omits it). "" when the URL is
+// unparseable — the caller then simply skips the bypass annotation.
+func echoHostPort(echoURL string) string {
+	u, err := url.Parse(echoURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Port() != "" {
+		return u.Host
+	}
+	switch u.Scheme {
+	case "https":
+		return net.JoinHostPort(u.Hostname(), "443")
+	case "http":
+		return net.JoinHostPort(u.Hostname(), "80")
+	}
+	return u.Host
 }
 
 // engineClaiming returns the name of the engine that would claim spec, for

@@ -128,3 +128,44 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// A rejected spec must never surface the credentials it carries. This is the
+// path a failed boot logs, so a leak here lands in a file that outlives the
+// process. 能红: return fmt.Errorf("%w: %s", ErrInvalidProxyURL, err) from the
+// parse branch and the password appears in the message.
+func TestSetProxyOverride_ErrorNeverLeaksCredentials(t *testing.T) {
+	t.Cleanup(func() { _ = SetProxyOverride("") })
+	for _, bad := range []string{
+		"http://user:hunter2@10.0.0.5:3128\x7f", // forces url.Parse to fail
+		"ht tp://user:hunter2@10.0.0.5:3128",
+		"ftp://user:hunter2@10.0.0.5:3128", // valid parse, rejected scheme
+		"http://user:hunter2@10.0.0.5",     // valid parse, missing port
+	} {
+		err := SetProxyOverride(bad)
+		if err == nil {
+			t.Fatalf("%q was accepted", bad)
+		}
+		if contains(err.Error(), "hunter2") {
+			t.Errorf("error leaked the password for %q: %v", bad, err)
+		}
+	}
+}
+
+// Redact keeps the parts an operator needs (scheme, host, port) and drops the
+// part they must not see, and never echoes an unparseable spec back.
+func TestRedact(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", ""},
+		{"http://user:hunter2@10.0.0.5:3128", "http://user:xxxxx@10.0.0.5:3128"},
+		{"socks5://10.0.0.5:1080", "socks5://10.0.0.5:1080"},
+		{"ht tp://user:hunter2@x", "(unparseable)"},
+		{"nonsense", "(unparseable)"},
+	} {
+		if got := Redact(tc.in); got != tc.want {
+			t.Errorf("Redact(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if tc.in != "" && contains(Redact(tc.in), "hunter2") {
+			t.Errorf("Redact(%q) leaked the password", tc.in)
+		}
+	}
+}
