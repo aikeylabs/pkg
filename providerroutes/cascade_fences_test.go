@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,18 +36,77 @@ import (
 // URL resolves to ITSELF". Two pre-existing rows are alias rows whose base_url
 // deliberately points at a DIFFERENT host (www.kimi.com → api.kimi.com,
 // platform.moonshot.cn → api.moonshot.cn), so a self-hit assertion would fail
-// on real, intended behaviour on its very first run — and would then get
+// on real, intended behavior on its very first run — and would then get
 // "fixed" into a whitelist exception, which is how fences die. See
 // baseline-routes.md for the round-trip table this fixture came from.
+// intentionalRowChange is a NAMED, dated exception to I-3: one pre-cascade row
+// that a later decision deliberately edited.
+//
+// 🔴 Why an exception table instead of regenerating the baseline fixture. The
+// fixture is the only record of what the table looked like before the
+// expansion; rewriting it to match today's yaml would make the fence assert
+// that the table agrees with itself, and would erase the very thing an operator
+// needs during a staggered rollout — what an un-upgraded worker still does.
+//
+// So the exception carries its own evidence and is ASSERTED, not merely
+// tolerated: the new field values, and the upgrade consequence (the upstream a
+// pre-upgrade worker dials versus the one this binary dials). Getting the
+// change wrong, or reverting it, reds this fence just as loudly as an
+// unannounced edit would. Every OTHER pre-cascade row is still held byte-exact.
+type intentionalRowChange struct {
+	why string
+
+	// The new expected values for the fields I-3 pins. Only fields listed here
+	// may differ from the baseline; anything else still reds.
+	newVersion           string
+	newEffectiveUpstream string
+
+	// The upgrade consequence, in the same shape as the mixed-version manifest:
+	// what a client sends, where a pre-upgrade worker sent it, where this binary
+	// sends it. 🚫 Do not leave these blank to "simplify" — an intentional
+	// re-point whose destination nobody wrote down is indistinguishable from an
+	// accident.
+	clientPath  string
+	oldUpstream string
+	newUpstream string
+}
+
+var intentionalRowChanges = map[string]intentionalRowChange{
+	"open.bigmodel.cn|": {
+		why: "2026-08-03, §6 route-table health check: with version \"\" an OpenAI-compatible " +
+			"client's own /v1 was forwarded to zhipu's LEGACY v1 API, which answers an auth " +
+			"failure with HTTP 200 and a body carrying no `choices` — the client parses a " +
+			"success that is not one. /v4 answers 401 with the modern envelope. The row's " +
+			"api.z.ai sibling already declared /v4. path_prefix stays \"\", so stored " +
+			"credentials still MATCH this row; what changes is which version the proxy " +
+			"re-attaches — i.e. every existing zhipu openai credential is re-pointed from " +
+			"the legacy API to v4. That is the decision, taken knowingly.",
+		newVersion:           "/v4",
+		newEffectiveUpstream: "https://open.bigmodel.cn/api/paas/v4",
+		clientPath:           "/v1/chat/completions",
+		oldUpstream:          "https://open.bigmodel.cn/api/paas/v1/chat/completions",
+		newUpstream:          "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+	},
+}
+
 func TestFence_I3_BaselineRoutesUnchanged(t *testing.T) {
 	baseline := loadBaseline(t)
 	if len(baseline) == 0 {
 		t.Fatal("baseline fixture is empty — anti-vacuous assertion (an empty fixture would pass everything)")
 	}
 	tbl := Default()
+	oldTbl := tableFromBaseline(t)
+	usedException := map[string]bool{}
 
 	for _, want := range baseline {
 		name := want.Host + "|" + want.PathPrefix
+		if exc, isException := intentionalRowChanges[name]; isException {
+			usedException[name] = true
+			t.Run(name+" (intentional change)", func(t *testing.T) {
+				assertIntentionalChange(t, tbl, oldTbl, want, exc)
+			})
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
 			// The row itself must still exist, unmodified in every routing field.
 			var found *Route
@@ -87,6 +147,82 @@ func TestFence_I3_BaselineRoutesUnchanged(t *testing.T) {
 					eff, want.HitProvider, want.HitProtocol, hit.Provider, hit.Protocol)
 			}
 		})
+	}
+
+	// A stale exception is its own kind of rot: it would silently re-grant
+	// permission to edit a row nobody is editing any more.
+	for name := range intentionalRowChanges {
+		if !usedException[name] {
+			t.Errorf("intentionalRowChanges lists %q but the baseline has no such row — remove the stale exception", name)
+		}
+	}
+}
+
+// assertIntentionalChange holds a named exception to everything I-3 would
+// otherwise assert, and to the upgrade consequence the exception owes.
+func assertIntentionalChange(t *testing.T, tbl, oldTbl *Table, want baselineEntry, exc intentionalRowChange) {
+	t.Helper()
+
+	var found *Route
+	for _, r := range tbl.All() {
+		if r.Host == want.Host && r.PathPrefix == want.PathPrefix {
+			rr := r
+			found = &rr
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("row (%q, %q) is listed as an INTENTIONAL CHANGE but has disappeared entirely.\n  why it was changed: %s\n  Deleting a pre-cascade row is a different decision from editing one — if it is really meant to go, say so here.",
+			want.Host, want.PathPrefix, exc.why)
+	}
+
+	// Everything except the declared field must still be byte-identical.
+	if found.Protocol != want.Protocol || found.Provider != want.Provider || found.BaseURL != want.BaseURL {
+		t.Errorf("row (%q, %q) changed MORE than its declared exception:\n  protocol %q → %q\n  provider %q → %q\n  base_url %q → %q\n  the exception covers `version` only",
+			want.Host, want.PathPrefix,
+			want.Protocol, found.Protocol, want.Provider, found.Provider, want.BaseURL, found.BaseURL)
+	}
+	if found.Version != exc.newVersion {
+		t.Errorf("row (%q, %q) version = %q, the exception declares %q (baseline had %q).\n  why: %s",
+			want.Host, want.PathPrefix, found.Version, exc.newVersion, want.Version, exc.why)
+	}
+	if eff := EffectiveUpstream(*found); eff != exc.newEffectiveUpstream {
+		t.Errorf("EffectiveUpstream = %q, the exception declares %q", eff, exc.newEffectiveUpstream)
+	}
+
+	// The row must still be the one a stored credential resolves to. This half
+	// is NOT excepted: re-pointing which version we dial is the decision that
+	// was taken; re-pointing which ROW a stored URL lands on is not, and would
+	// change the protocol adapter under existing credentials.
+	for _, stored := range []string{want.EffectiveUpstream, exc.newEffectiveUpstream} {
+		hit, ok := tbl.LookupByBaseURL(stored)
+		if !ok {
+			t.Errorf("stored base_url %q no longer resolves at all — existing credentials would fall to the degraded path", stored)
+			continue
+		}
+		if hit.Host != want.HitHost || hit.PathPrefix != want.HitPathPrefix ||
+			hit.Protocol != want.HitProtocol || hit.Provider != want.HitProvider {
+			t.Errorf("ROUTE DRIFT for stored base_url %q: baseline resolved to (%q,%q) %s/%s, now (%q,%q) %s/%s.\n  The exception permits a VERSION change, not a change of row.",
+				stored, want.HitHost, want.HitPathPrefix, want.HitProvider, want.HitProtocol,
+				hit.Host, hit.PathPrefix, hit.Provider, hit.Protocol)
+		}
+	}
+
+	// And the upgrade consequence, computed rather than asserted from memory:
+	// old table + old code (what a field worker still runs) vs this binary.
+	gotOld := stitchOldRule(oldTbl, want.EffectiveUpstream, exc.clientPath)
+	gotNew := stitchWith(t, tbl, exc.newEffectiveUpstream, exc.clientPath)
+	if gotOld != exc.oldUpstream {
+		t.Errorf("a PRE-UPGRADE worker dials %q for client path %q, the exception records %q — the recorded consequence is wrong, and it is what an operator plans the rollout with",
+			gotOld, exc.clientPath, exc.oldUpstream)
+	}
+	if gotNew != exc.newUpstream {
+		t.Errorf("THIS binary dials %q for client path %q, the exception records %q",
+			gotNew, exc.clientPath, exc.newUpstream)
+	}
+	if gotOld == gotNew {
+		t.Errorf("the recorded upgrade consequence is a no-op (%q == %q) — an intentional row change that changes nothing is either already reverted or recorded against the wrong client path",
+			gotOld, gotNew)
 	}
 }
 
@@ -472,12 +608,12 @@ func TestFence_HostMatchesBaseURL(t *testing.T) {
 // mixedVersionRow is one row whose upstream differs between the pre-cascade
 // table (an un-upgraded worker's embedded copy) and the post-cascade table.
 type mixedVersionRow struct {
-	Host       string `json:"host"`
-	PathPrefix string `json:"path_prefix"`
-	Provider   string `json:"provider"`
-	Protocol   string `json:"protocol"`
-	StoredURL  string `json:"stored_base_url"`
-	ClientPath string `json:"client_path"`
+	Host        string `json:"host"`
+	PathPrefix  string `json:"path_prefix"`
+	Provider    string `json:"provider"`
+	Protocol    string `json:"protocol"`
+	StoredURL   string `json:"stored_base_url"`
+	ClientPath  string `json:"client_path"`
 	OldUpstream string `json:"old_proxy_upstream"`
 	NewUpstream string `json:"new_proxy_upstream"`
 	// OldRouteKnown records whether the OLD table matched a row at all. This is
@@ -511,7 +647,8 @@ func TestFence_I11_MixedVersionDiffIsEnumerated(t *testing.T) {
 		}
 		stored := EffectiveUpstream(r)
 		clientPath := clientPathFor(r.Protocol, r.Version)
-		oldUp := stitchWith(t, oldTbl, stored, clientPath)
+		// old worker = old table AND old code; see stitchOldRule.
+		oldUp := stitchOldRule(oldTbl, stored, clientPath)
 		newUp := stitchWith(t, newTbl, stored, clientPath)
 		if oldUp == newUp {
 			continue // an un-upgraded worker behaves identically; nothing to report
@@ -575,12 +712,58 @@ func TestFence_I11_MixedVersionDiffIsEnumerated(t *testing.T) {
 // Both real client shapes converge under Stitch's one rule (the version is
 // stripped once and re-attached once), so exercising the with-version shape
 // also covers the without-version one.
-func clientPathFor(protocol, version string) string {
-	endpoint := "/chat/completions"
+// clientPathFor is what a REAL SDK sends after the proxy strips the
+// "/<provider>" routing prefix.
+//
+// 🔴 2026-08-03: this used to return `version + endpoint` — i.e. it simulated a
+// client that sends whatever version the ROW declares. No client does that.
+// OpenAI-compatible SDKs send /v1/chat/completions and Anthropic SDKs send
+// /v1/messages regardless of which version the upstream serves. Feeding the
+// row's own version in made the simulated old-worker URL byte-match the row's
+// version and get stripped, which is exactly how three rows of
+// mixed-version-affected-rows.md came to state a destination no real worker
+// ever produces. Measured against a real alpha.15 worker on staging, the
+// corrected values below match reality on all 26 rows.
+func clientPathFor(protocol, _ string) string {
 	if protocol == "anthropic" {
-		endpoint = "/messages"
+		return "/v1/messages"
 	}
-	return version + endpoint
+	return "/v1/chat/completions"
+}
+
+// stitchOldRule reproduces the PRE-2026-08-03 stitch: the version segment was
+// stripped from the client path only when it was BYTE-EQUAL to the row's own
+// version.
+//
+// 🔴 Why this frozen copy has to exist. The fence answers "what does an
+// un-upgraded worker do", and an un-upgraded worker runs the old TABLE *and*
+// the old CODE. Computing the old column with the current stitch silently
+// assumed the algorithm never changes; when it did, the fence started
+// reporting a destination that no deployed binary produces — and, worse,
+// pointed at the manifest as the thing to "correct". The manifest feeds
+// release notes, so that direction of error tells customers something false.
+// 🚫 Do not "simplify" this back to tbl.Stitch.
+func stitchOldRule(tbl *Table, storedBaseURL, clientPath string) string {
+	u, err := url.Parse(storedBaseURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	basePath, version := strings.TrimRight(u.Path, "/"), ""
+	if r, ok := tbl.Lookup(strings.ToLower(u.Host), u.Path); ok {
+		if bu, err := url.Parse(r.BaseURL); err == nil {
+			basePath, version = strings.TrimRight(bu.Path, "/"), r.Version
+		}
+	}
+	reqPath := clientPath
+	if version != "" {
+		switch {
+		case strings.HasPrefix(reqPath, version+"/"):
+			reqPath = strings.TrimPrefix(reqPath, version)
+		case reqPath == version:
+			reqPath = ""
+		}
+	}
+	return u.Scheme + "://" + u.Host + basePath + version + reqPath
 }
 
 func stitchWith(t *testing.T, tbl *Table, storedBaseURL, clientPath string) string {

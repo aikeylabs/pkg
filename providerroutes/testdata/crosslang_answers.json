@@ -39,7 +39,6 @@
       "together",
       "fireworks",
       "cerebras",
-      "github_models",
       "vercel_gateway",
       "sambanova",
       "aihubmix",
@@ -68,9 +67,6 @@
       "anthropic"
     ],
     "fireworks": [
-      "openai_compatible"
-    ],
-    "github_models": [
       "openai_compatible"
     ],
     "google": [
@@ -274,24 +270,6 @@
       "protocol": "openai_compatible",
       "ok": true,
       "url": "https://api.fireworks.ai/inference/v1"
-    },
-    {
-      "provider": "github_models",
-      "protocol": "anthropic",
-      "ok": false,
-      "url": ""
-    },
-    {
-      "provider": "github_models",
-      "protocol": "gemini",
-      "ok": false,
-      "url": ""
-    },
-    {
-      "provider": "github_models",
-      "protocol": "openai_compatible",
-      "ok": true,
-      "url": "https://models.github.ai/inference"
     },
     {
       "provider": "google",
@@ -705,7 +683,7 @@
       "provider": "zhipu",
       "protocol": "openai_compatible",
       "ok": true,
-      "url": "https://open.bigmodel.cn/api/paas"
+      "url": "https://open.bigmodel.cn/api/paas/v4"
     }
   ],
   "effective_upstream": [
@@ -812,7 +790,7 @@
       "path_prefix": "",
       "provider": "zhipu",
       "protocol": "openai_compatible",
-      "url": "https://open.bigmodel.cn/api/paas"
+      "url": "https://open.bigmodel.cn/api/paas/v4"
     },
     {
       "host": "open.bigmodel.cn",
@@ -1002,13 +980,6 @@
       "provider": "cerebras",
       "protocol": "openai_compatible",
       "url": "https://api.cerebras.ai/v1"
-    },
-    {
-      "host": "models.github.ai",
-      "path_prefix": "",
-      "provider": "github_models",
-      "protocol": "openai_compatible",
-      "url": "https://models.github.ai/inference"
     },
     {
       "host": "ai-gateway.vercel.sh",
