@@ -1,11 +1,20 @@
 # CI gate — runs unit tests on every push and PR.
 # Project rule: 持续交付 = CI/CD 失败即失败. A non-zero exit blocks the PR.
 #
-# pkg is a MULTI-MODULE repo: each shared library (usagehash, secretobf,
-# aikeytime, providerroutes, buildinfo, aikeycompat) is its own Go module.
-# The matrix tests each independently; fail-fast: false so one module's
-# failure still reports the others. These libs are billing- and
-# security-sensitive (usagehash, secretobf), so the gate matters.
+# pkg is a MULTI-MODULE repo: each shared library is its own Go module, so a
+# single `go test ./...` at the root covers NOTHING (./... does not cross module
+# boundaries). The matrix tests each module independently; fail-fast: false so
+# one module's failure still reports the others.
+#
+# The module list is DISCOVERED from the filesystem, never hand-maintained.
+# Why (2026-08-10): it used to be a literal
+#   [usagehash, secretobf, aikeytime, providerroutes, buildinfo, aikeycompat]
+# and the repo had grown to 13 modules — so 7 were silently untested in CI,
+# including `routingwire`, whose entire reason for existing is to be a
+# cross-repo wire contract that must not drift. A hand-maintained list of things
+# to check is the same failure shape as a hand-copied protocol codec: it is held
+# in lockstep by nothing but somebody remembering. Adding a module now wires
+# itself up; forgetting is no longer possible.
 name: CI
 
 on:
@@ -17,12 +26,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.list.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        name: Discover Go modules
+        run: |
+          set -euo pipefail
+          # Every directory holding a go.mod is a module under test. -maxdepth 2
+          # keeps this to the top-level libraries and ignores testdata fixtures.
+          modules=$(find . -maxdepth 2 -name go.mod -not -path './.*' \
+            | sed 's|^\./||; s|/go.mod$||' | sort | jq -R -s -c 'split("\n")[:-1]')
+          echo "modules=${modules}" >> "$GITHUB_OUTPUT"
+          echo "::notice::modules under test: ${modules}"
+          # An empty or malformed list would make the matrix job vanish and the
+          # workflow report success with zero tests run — the exact false green
+          # this discovery step exists to prevent.
+          count=$(echo "${modules}" | jq 'length')
+          if [ "${count}" -lt 1 ]; then
+            echo "::error::discovered 0 Go modules — the matrix would be empty and CI would pass vacuously"
+            exit 1
+          fi
+
   test:
+    needs: discover
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        module: [usagehash, secretobf, aikeytime, providerroutes, buildinfo, aikeycompat]
+        module: ${{ fromJSON(needs.discover.outputs.modules) }}
     defaults:
       run:
         working-directory: ${{ matrix.module }}
