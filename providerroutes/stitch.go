@@ -25,8 +25,9 @@ import (
 //     nothing, and still strips (perplexity).
 //   - If vaultBaseURL parses but its host is NOT in the table →
 //     degraded literal-prepend (base_url path + reqPath). Third-party
-//     gateways absent from yaml still flow; expected fix is to add
-//     them as a yaml row.
+//     gateways absent from yaml still flow. The only normalization on this
+//     branch is collapsing an identical numeric version segment at the join
+//     (for example /v1 + /v1/messages); every other path is preserved.
 //   - If vaultBaseURL is empty → the caller should resolve a default
 //     URL (e.g. via ByProvider) before calling Stitch; this function
 //     does not synthesise hosts out of thin air.
@@ -123,12 +124,12 @@ func stitchRequestURL(req *http.Request, target *url.URL, basePath, version stri
 		// vendor in the table needs it.
 		//
 		// 🚫 The DEGRADED path (rowKnown=false, an unknown host taking the
-		// literal-prepend branch) is untouched on purpose. There the table
-		// knows nothing about the vendor's shape, the stored base_url is all
-		// there is, and a private gateway stored as https://gw.example serving
-		// /v1/chat/completions would break the moment we swallowed its /v1.
-		// Deciding for a vendor we know is not the same act as deciding for one
-		// we do not.
+		// literal-prepend branch) must keep the client's version segment. There
+		// the table knows nothing about the vendor's shape, and a private gateway
+		// stored as https://gw.example serving /v1/chat/completions would break
+		// if we swallowed its /v1. The narrow duplicate-at-the-join rule below is
+		// the only exception: /v1 + /v1/messages can never require two adjacent
+		// identical version segments.
 		//
 		// The branches are a UNION, not a replacement. Byte-equality still
 		// comes first because it is the only thing that can strip a NON-numeric
@@ -144,6 +145,12 @@ func stitchRequestURL(req *http.Request, target *url.URL, basePath, version stri
 		default:
 			reqPath = trimLeadingVersionSegment(reqPath)
 		}
+	} else if duplicate := trailingVersionSegment(basePath); duplicate != "" &&
+		(reqPath == duplicate || strings.HasPrefix(reqPath, duplicate+"/")) {
+		// Unknown hosts deliberately retain literal-prepend semantics. Collapse
+		// only the exact numeric version duplicated at the concatenation point;
+		// different versions and non-numeric segments remain byte-for-byte.
+		reqPath = strings.TrimPrefix(reqPath, duplicate)
 	}
 
 	stitched := basePath + version + reqPath
@@ -186,6 +193,25 @@ func trimLeadingVersionSegment(p string) string {
 		}
 	}
 	return p[len(seg)+1:]
+}
+
+// trailingVersionSegment returns the final path segment only when it is a
+// strict numeric API version such as "/v1" or "/v12". It intentionally shares
+// trimLeadingVersionSegment's grammar so values such as "/v1beta" and
+// "/v1abc" are never normalized as versions.
+func trailingVersionSegment(p string) string {
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		return ""
+	}
+	segment := p
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		segment = p[i:]
+	}
+	if !strings.HasPrefix(segment, "/v") || trimLeadingVersionSegment(segment) != "" {
+		return ""
+	}
+	return segment
 }
 
 // PathDiscarded reports whether resolving storedBaseURL through this table
@@ -289,10 +315,10 @@ func (t *Table) resolveStitchComponents(host, parsedPath string) (basePath, vers
 			return strings.TrimRight(u.Path, "/"), r.Version, true
 		}
 	}
-	// Fallback: literal-prepend the user's stored path, no version
-	// re-attach. Hosts not yet in yaml table still route, just without
-	// dedup. This is the correct degraded behavior — fail open with a
-	// best-effort path stitch rather than blocking a request that might
-	// well work upstream.
+	// Fallback: literal-prepend the user's stored path, no table-derived version
+	// re-attach. stitchRequestURL only collapses an identical numeric version at
+	// the join; all other unknown-host paths remain literal. This is the correct
+	// degraded behavior — fail open with a best-effort path stitch rather than
+	// blocking a request that might well work upstream.
 	return strings.TrimRight(parsedPath, "/"), "", false
 }
