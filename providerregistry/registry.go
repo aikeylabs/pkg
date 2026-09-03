@@ -1,7 +1,7 @@
 // Package providerregistry exposes aikey-cli/data/provider_registry.yaml — the
 // declared single source of truth for provider capability — to Go consumers.
 //
-// FOUR IDENTIFIERS, DELIBERATELY NOT UNIFIED
+// # FOUR IDENTIFIERS, DELIBERATELY NOT UNIFIED
 //
 // A provider row carries up to four distinct strings, and conflating any two of
 // them has caused production bugs twice on the same day:
@@ -13,16 +13,16 @@
 //
 // The rows where these diverge are exactly where things broke:
 //
-//	code=kimi_code  family=kimi  proxy_path=kimi/v1      aliases=[kimi]
-//	code=moonshot   family=kimi  proxy_path=moonshot/v1  aliases=[]
+//		code=kimi_code  family=kimi  proxy_path=kimi/v1      aliases=[kimi]
+//		code=moonshot   family=kimi  proxy_path=moonshot/v1  aliases=[]
 //
-//   - bugfix 2026-05-08-provider-info-canonical-code-folded-into-family: Rust's
-//     provider_info() returned entry.family as canonical_code, so `aikey use
-//     moonshot` resolved to "kimi" and wrote the wrong env vars, base_url and
-//     binding. Fix was splitting canonical_code (entry.code) from family.
-//   - bugfix 2026-05-08-events-provider-uses-url-prefix-not-canonical: usage
-//     events recorded the URL prefix ("kimi") instead of the canonical code
-//     ("kimi_code"), so one key's traffic was billed as two providers.
+//	  - bugfix 2026-05-08-provider-info-canonical-code-folded-into-family: Rust's
+//	    provider_info() returned entry.family as canonical_code, so `aikey use
+//	    moonshot` resolved to "kimi" and wrote the wrong env vars, base_url and
+//	    binding. Fix was splitting canonical_code (entry.code) from family.
+//	  - bugfix 2026-05-08-events-provider-uses-url-prefix-not-canonical: usage
+//	    events recorded the URL prefix ("kimi") instead of the canonical code
+//	    ("kimi_code"), so one key's traffic was billed as two providers.
 //
 // Both records note the same trap: before the kimi split these strings were
 // always equal, so a conflated call site looked correct until the day it wasn't.
@@ -93,6 +93,7 @@ type Registry struct {
 //   - non-empty code
 //   - no duplicate code
 //   - no alias colliding with another entry's code or alias
+//   - no row claiming a reserved path prefix (see reserved.go)
 func Parse(yamlBytes []byte) (*Registry, error) {
 	var raw struct {
 		Providers []Entry `yaml:"providers"`
@@ -118,6 +119,14 @@ func Parse(yamlBytes []byte) (*Registry, error) {
 			return nil, fmt.Errorf("providerregistry: duplicate code %q", code)
 		}
 		e.Code = code
+		// 🔴 Reserved-prefix guard (I9 / R13). Must run BEFORE the row is
+		// admitted: aikey-proxy derives its whole client path-prefix table from
+		// this registry, so a row claiming `mcp` would silently hijack the MCP
+		// gateway's public surface. See reserved.go for why this refuses rather
+		// than skipping.
+		if err := checkReserved(e); err != nil {
+			return nil, err
+		}
 		// family defaults to code — mirrors the Rust loader so both languages
 		// report the same family for rows that omit the field.
 		if f := norm(e.Family); f != "" {
