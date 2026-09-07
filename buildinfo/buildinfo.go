@@ -62,7 +62,19 @@ func resolve() Info {
 		i.Version = "dev"
 	}
 	if i.Revision == "" {
-		i.Revision, i.Dirty, i.BuildTime = readVCS()
+		// 🔴 The VCS fallback FILLS EMPTY FIELDS; it does not overwrite stamped
+		// ones (2026-09-07). It used to assign BuildTime unconditionally here,
+		// so an explicitly injected -X ...BuildTime was silently discarded
+		// whenever Revision happened not to be injected — which is every build,
+		// since no script stamps Revision. That contradicts this function's own
+		// documented priority ("ldflags values > Go VCS metadata > defaults")
+		// and was dormant only because nothing stamped BuildTime until the app
+		// needed it to tell one build from another.
+		rev, dirty, vcsTime := readVCS()
+		i.Revision, i.Dirty = rev, dirty
+		if i.BuildTime == "" {
+			i.BuildTime = vcsTime
+		}
 	} else {
 		i.Dirty = strings.HasSuffix(i.Revision, "-dirty")
 	}

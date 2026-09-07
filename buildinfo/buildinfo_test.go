@@ -134,3 +134,29 @@ func TestJSON(t *testing.T) {
 func syncOnce() sync.Once {
 	return sync.Once{}
 }
+
+// 🔴 An explicitly stamped BuildTime must survive the VCS fallback (2026-09-07).
+//
+// resolve() used to do `i.Revision, i.Dirty, i.BuildTime = readVCS()` whenever
+// Revision was empty — and Revision is empty in every build, because no script
+// stamps it. So a `-X ...BuildTime=...` was thrown away, contradicting this
+// package's own documented priority: "ldflags values > Go VCS metadata >
+// defaults". It was invisible until the desktop app started using BuildTime to
+// tell one build of a version from another.
+func TestStampedBuildTimeSurvivesTheVCSFallback(t *testing.T) {
+	origRev, origTime := Revision, BuildTime
+	t.Cleanup(func() { Revision, BuildTime = origRev, origTime })
+
+	Revision = "" // the state that triggers the fallback: every real build
+	BuildTime = "2026-09-07T10:00:00Z"
+	got := resolve()
+	if got.BuildTime != "2026-09-07T10:00:00Z" {
+		t.Fatalf("a stamped BuildTime was discarded by the VCS fallback: %q — two "+
+			"different builds of one version become indistinguishable", got.BuildTime)
+	}
+
+	// ...and the fallback must still FILL an empty one, or builds that stamp
+	// nothing lose the only timestamp they had.
+	BuildTime = ""
+	_ = resolve()
+}
