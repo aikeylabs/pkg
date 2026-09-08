@@ -308,19 +308,25 @@ func TestDigestArgsStringLengthIsDecodedBytes(t *testing.T) {
 // link state (R17)
 // ---------------------------------------------------------------------------
 
-// TestLinkStatesAreFourDistinctValues is the wire half of fence 13.F4.
+// TestLinkStatesAreDistinctValues is the wire half of fence 13.F4.
 //
 // R17 forbids collapsing pending and bypassed: the first is noise, the second
 // is a security event. A boolean here would render them as the same pixel.
-func TestLinkStatesAreFourDistinctValues(t *testing.T) {
-	all := []LinkState{LinkStateLinked, LinkStatePending, LinkStateBypassed, LinkStateUnsupported}
+//
+// 🔴 Renamed from ...AreFourDistinctValues on 2026-09-02 when `unlinkable` was
+// added. The count belonged in the name for as long as it was four, and then
+// the name was a lie the moment it was five — so it is out of the name now and
+// derived from the slice instead.
+func TestLinkStatesAreDistinctValues(t *testing.T) {
+	all := []LinkState{LinkStateLinked, LinkStatePending, LinkStateBypassed, LinkStateUnsupported,
+		LinkStateUnlinkable}
 	seen := map[LinkState]bool{}
 	for _, s := range all {
 		if s == "" {
 			t.Error("a link state must never be the empty string")
 		}
 		if seen[s] {
-			t.Errorf("link state %q is duplicated — the four states must stay distinct", s)
+			t.Errorf("link state %q is duplicated — all %d states must stay distinct", s, len(all))
 		}
 		seen[s] = true
 	}
@@ -413,8 +419,9 @@ func TestLinkStateDomainMatchesTheSchemaEnumRegistry(t *testing.T) {
 	// query service, and dragging a migration toolkit into all three to read a
 	// four-element list would be a real delivery cost). The registry-side entry
 	// names this test in its comment, so the pair is discoverable from either end.
-	want := []string{"linked", "pending", "bypassed", "unsupported"}
-	got := []LinkState{LinkStateLinked, LinkStatePending, LinkStateBypassed, LinkStateUnsupported}
+	want := []string{"linked", "pending", "bypassed", "unsupported", "unlinkable"}
+	got := []LinkState{LinkStateLinked, LinkStatePending, LinkStateBypassed, LinkStateUnsupported,
+		LinkStateUnlinkable}
 	if len(got) != len(want) {
 		t.Fatalf("this package declares %d link states, the registry %d", len(got), len(want))
 	}
@@ -423,9 +430,31 @@ func TestLinkStateDomainMatchesTheSchemaEnumRegistry(t *testing.T) {
 			t.Errorf("link state %d = %q, registry says %q", i, got[i], want[i])
 		}
 	}
-	// 🚫 The two unmatched states must stay distinct values.
-	if LinkStatePending == LinkStateBypassed {
-		t.Fatal("pending and bypassed are the same value; the first resolves itself and the " +
-			"second is a security finding")
+	// 🚫 The three unmatched states must stay distinct values. Each pair below
+	// has been collapsed by somebody's "simplification" in some codebase, and
+	// each collapse turns a truthful record into a false one:
+	//
+	//	pending / bypassed     the first resolves itself; the second is a
+	//	                       security finding
+	//	pending / unlinkable   the first promises an answer is coming; on an
+	//	                       unlinkable path it never is
+	//	bypassed / unlinkable  the first accuses the call of skipping the
+	//	                       gateway; the second admits we cannot tell. Merging
+	//	                       these is precisely the 100% false alarm that
+	//	                       `unlinkable` was added to stop (see LinkState docs)
+	for _, pair := range []struct {
+		a, b LinkState
+		why  string
+	}{
+		{LinkStatePending, LinkStateBypassed,
+			"the first resolves itself and the second is a security finding"},
+		{LinkStatePending, LinkStateUnlinkable,
+			"the first promises an answer is coming and the second knows it is not"},
+		{LinkStateBypassed, LinkStateUnlinkable,
+			"the first accuses the call of skipping the gateway and the second admits we cannot tell"},
+	} {
+		if pair.a == pair.b {
+			t.Fatalf("%q and %q are the same value; %s", pair.a, pair.b, pair.why)
+		}
 	}
 }

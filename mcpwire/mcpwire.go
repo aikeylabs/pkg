@@ -332,6 +332,42 @@ const (
 	// tool-call capture. 🔴 NOT the same as "this turn had no tool calls";
 	// rendering it as the latter is a false report (tasks 13.8).
 	LinkStateUnsupported LinkState = "unsupported"
+	// LinkStateUnlinkable — no verdict is possible, because the join key this
+	// link depends on is not available on this path.
+	//
+	// 🔴 WHY THIS VALUE EXISTS (2026-09-02 user decision). Without it, leg B
+	// produces a FALSE SECURITY ALARM on 100% of traffic from the main client.
+	// The chain is short and every link of it was already written down:
+	//
+	//   · the only explicit join key is mcp_call_event.conversation_session_id,
+	//     lifted from an X-Aikey-Session-Id / X-Claude-Code-Session-Id header on
+	//     the MCP request (session-fingerprint.yaml, `protocol: mcp` — task 7.5b)
+	//   · task 7.5c registered, as EXPECTED behaviour, that Claude Code's MCP
+	//     client sends NEITHER header ⇒ that column is permanently empty for the
+	//     client most customers actually run
+	//   · so "look for a match, and call it Bypassed when the backfill window
+	//     closes" (tasks 13.10b / 13.11) reaches Bypassed for every single tool
+	//     call — including calls that demonstrably DID traverse the gateway
+	//   · and Bypassed is a security finding: compliance-alert colour (13.13a)
+	//     plus alert escalation on repetition (13.12a)
+	//
+	// 🔴 The backfill window cannot separate these. It distinguishes "not here
+	// YET" from "not here at all"; it cannot distinguish either from "this path
+	// carries nothing to match on". That third case needs its own value, or the
+	// audit record lies — and task 7.5c states the standard it would violate:
+	// 会骗人的审计记录比没有记录更糟 (a lying audit record is worse than none,
+	// because with none the reader knows they do not know).
+	//
+	// 🚫 NOT a synonym for Pending: Pending promises the answer is coming, and
+	// on this path it never is. 🚫 NOT a synonym for Unsupported either: that one
+	// is about the capturing PROXY's version, this one is about the join key.
+	//
+	// It also covers the second undecidable shape: the key IS present but does
+	// not identify one row (the same tool called several times in one session
+	// — the wire carries no per-call id to tell them apart). Both are the same
+	// honest answer, "the key does not settle this", and 🚫 neither may be
+	// resolved by ordering, timestamps or seat proximity (R17 / task 13.9a).
+	LinkStateUnlinkable LinkState = "unlinkable"
 )
 
 // TurnToolCall is one tool call extracted from a model response, as stored in

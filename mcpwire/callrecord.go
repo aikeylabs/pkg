@@ -80,6 +80,29 @@ type CallRecord struct {
 	// word list. 🔴 Never empty: an unrecognised client is `unknown-app`, which
 	// is a verdict, not a gap.
 	AppSlug string `json:"app_slug"`
+	// ActorID is the client's own identifier for WHICH AGENT made this call
+	// (P15 · K3 · task 15.20), extracted at ingress from the actor fingerprint
+	// table — 🚫 never guessed, never derived, never correlated.
+	//
+	// 🔴 Never empty on the wire. A client that supplies nothing is recorded as
+	// `UnknownActor` ("unknown-actor"), which is a VERDICT — "we looked and the
+	// client told us nothing" — and is a different fact from the empty string,
+	// which means "this row was written by a proxy that did not collect an actor
+	// at all". Both are permanent; they have different causes, and the console
+	// must be able to tell them apart (R52's shape, applied to the actor).
+	// 🚫 Do not "tidy" the constant away by defaulting to "": a blank cell reads
+	// as a defect in us and invites somebody to go fill it in by guessing.
+	//
+	// 🔴 On Claude Code this is expected to be `unknown-actor` essentially 100%
+	// of the time, and that is NOT a bug to go fix — PRD §0.7: Claude Code's MCP
+	// requests structurally carry no agent identifier, the same reason they carry
+	// no conversation id (see ConversationSessionID). The value of recording the
+	// field is that the gap becomes MEASURABLE (EventActorUnresolved) instead of
+	// being an assumption. 🚫 Closing it with a time-window or same-seat
+	// heuristic is forbidden (I33): a plausible-but-wrong attribution in an audit
+	// trail is worse than an admitted blank, because it gets acted on.
+	// Fence: TestActor_NoHeuristicResolution.
+	ActorID string `json:"actor_id"`
 	// Origin separates a real Agent call from a console "try it" click.
 	// 🔴 A value, never a bypass: a console test is billed, rate-limited and
 	// recorded exactly like any other call.
