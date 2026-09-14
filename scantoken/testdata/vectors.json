@@ -1,0 +1,35 @@
+{
+  "note": "Cross-language fixture: Go pkg/scantoken and Python ai-compliance-workers/workers/scan_token.py must both produce and accept these byte-for-byte.",
+  "ttl_seconds": 600,
+  "skew_allowance_seconds": 30,
+  "vectors": [
+    {
+      "key_id": "k1",
+      "secret_utf8": "0123456789abcdef0123456789abcdef",
+      "org_id": "org_a",
+      "exp_unix": 1757620600,
+      "token": "sct1.org_a.1757620600.k1.SfhPpi5rTc_ut6TTB980x31VMRHVjgo-9hKLj7r53rA"
+    },
+    {
+      "key_id": "k1",
+      "secret_utf8": "0123456789abcdef0123456789abcdef",
+      "org_id": "org_with_underscores_and_digits_42",
+      "exp_unix": 1700000600,
+      "token": "sct1.org_with_underscores_and_digits_42.1700000600.k1.x6EjwBatBx_BAw4oBkX9RMFNbytceF_IIlZADKMBqls"
+    },
+    {
+      "key_id": "k2",
+      "secret_utf8": "fedcba9876543210fedcba9876543210",
+      "org_id": "org_b",
+      "exp_unix": 1757620600,
+      "token": "sct1.org_b.1757620600.k2.cWJHOTe-fDEygNXm5Py8JSphHK0y-ETDoPyEp3O5vkc"
+    },
+    {
+      "key_id": "k-rotated-2026-09",
+      "secret_utf8": "a-32-byte-secret-with-dashes-01!",
+      "org_id": "org_c",
+      "exp_unix": 1800000600,
+      "token": "sct1.org_c.1800000600.k-rotated-2026-09.F46Ufeahq3-0PElDRDlpwG6OsfDTQ_gU0aC0s33XyLI"
+    }
+  ]
+}
