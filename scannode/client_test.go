@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"net"
 	"sync/atomic"
@@ -40,7 +41,10 @@ type tlsProbe struct {
 	fingerprint string
 	bytesRead   atomic.Int64
 	conns       atomic.Int64
-	close       func()
+	// reply, when set, is written back after the first bytes of each read —
+	// a node answering on the same connection.
+	reply atomic.Pointer[[]byte]
+	close func()
 }
 
 func startTLSProbe(t *testing.T) *tlsProbe {
@@ -90,6 +94,9 @@ func startTLSProbe(t *testing.T) *tlsProbe {
 					_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 					n, err := c.Read(buf)
 					p.bytesRead.Add(int64(n))
+					if rp := p.reply.Load(); rp != nil && n > 0 {
+						_, _ = c.Write(*rp)
+					}
 					if err != nil {
 						return
 					}
@@ -200,5 +207,61 @@ func TestScanNodeClient_PublicAddressRefused(t *testing.T) {
 		if err := checkPrivateAddress(addr); err != nil {
 			t.Errorf("private address %s was refused: %v", addr, err)
 		}
+	}
+}
+
+func replyWith(t *testing.T, p *tlsProbe, r deepscan.ResultFrame) {
+	t.Helper()
+	b, err := deepscan.EncodeResult(r)
+	if err != nil {
+		t.Fatalf("encode result: %v", err)
+	}
+	p.reply.Store(&b)
+}
+
+// TestScanNodeClient_ReadsTheResultBack — the sink returns the node's answer.
+//
+// 🔴 It used to return right after writing the frame, so no finding a node
+// produced ever reached the proxy.
+// bugfix: workflow/CI/bugfix/20260913-async-scan-lane-never-returned-findings.md
+func TestScanNodeClient_ReadsTheResultBack(t *testing.T) {
+	p := startTLSProbe(t)
+	replyWith(t, p, deepscan.ResultFrame{JobID: "job-1", Status: deepscan.StatusComplete,
+		Findings: []deepscan.Finding{{Engine: deepscan.EngineRules, EntityType: "CN_PHONE", Start: 10, End: 21}}})
+	sink := NewTLSSink(Node{ID: "n1", Addr: p.addr, Fingerprint: p.fingerprint, Weight: 1}, trustAll, time.Second, 2*time.Second)
+	defer sink.Close()
+
+	if err := sink.Send(context.Background(), frame(t)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	rs, ok := sink.(interface {
+		Results() <-chan deepscan.ResultFrame
+	})
+	if !ok {
+		t.Fatal("the TLS sink does not expose Results()")
+	}
+	select {
+	case r := <-rs.Results():
+		if r.JobID != "job-1" || len(r.Findings) != 1 {
+			t.Fatalf("result altered in transit: %+v", r)
+		}
+	default:
+		t.Fatal("Send returned without the node's result being readable — the answer was not read back")
+	}
+}
+
+// TestScanNodeClient_RejectIsATypedError — a refusal comes back as a
+// RejectError carrying the code, never as a result and never as a generic error
+// (the forwarder decides by code whether another node may be tried).
+func TestScanNodeClient_RejectIsATypedError(t *testing.T) {
+	p := startTLSProbe(t)
+	replyWith(t, p, deepscan.ResultFrame{JobID: "job-1", Reject: deepscan.RejectTenantMismatch})
+	sink := NewTLSSink(Node{ID: "n1", Addr: p.addr, Fingerprint: p.fingerprint, Weight: 1}, trustAll, time.Second, 2*time.Second)
+	defer sink.Close()
+
+	err := sink.Send(context.Background(), frame(t))
+	var rej *deepscan.RejectError
+	if !errors.As(err, &rej) || rej.Code != deepscan.RejectTenantMismatch {
+		t.Fatalf("send error = %v, want RejectError{%s}", err, deepscan.RejectTenantMismatch)
 	}
 }

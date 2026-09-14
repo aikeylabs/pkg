@@ -88,6 +88,32 @@ func (s *tlsSink) Send(ctx context.Context, frame []byte) error {
 		s.conn = nil
 		return fmt.Errorf("scannode %s: write: %w", s.node.ID, err)
 	}
+	// 🔴 The node answers on the SAME connection, and that answer is the whole
+	// product of sending the frame. Until 2026-09-13 this returned right after
+	// the write: the result frame (findings, coverage, and any refusal) was never
+	// read, so no finding a node produced ever reached the proxy and nothing was
+	// filed — while delivery counters and node health both looked healthy.
+	// bugfix: workflow/CI/bugfix/20260913-async-scan-lane-never-returned-findings.md
+	_ = s.conn.SetReadDeadline(time.Now().Add(s.ackTimeout))
+	res, err := deepscan.ReadResult(s.conn)
+	if err != nil {
+		_ = s.conn.Close()
+		s.conn = nil
+		return fmt.Errorf("scannode %s: read result: %w", s.node.ID, err)
+	}
+	if res.Reject != "" {
+		// A refusal is not a result. Reset the connection (the node may close
+		// its end) and let the caller decide, by code, whether another node may
+		// be tried.
+		_ = s.conn.Close()
+		s.conn = nil
+		return &deepscan.RejectError{Code: res.Reject}
+	}
+	select {
+	case s.results <- res:
+	default:
+		return fmt.Errorf("scannode %s: result buffer full, result for job %s dropped", s.node.ID, res.JobID)
+	}
 	return nil
 }
 

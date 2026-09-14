@@ -1,8 +1,10 @@
 package deepscan
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 // Coverage status values (design §4b.12). `partial` is not a soft `complete`:
@@ -130,3 +132,31 @@ func DecodeResult(frame []byte) (ResultFrame, error) {
 	}
 	return r, nil
 }
+
+// ReadResult reads exactly one framed result — [1B version][4B LE length][JSON]
+// — from r. The declared length is checked against MaxFrameBytes BEFORE any
+// allocation, so a hostile or corrupt peer cannot make the reader allocate
+// whatever it claims. Every sink that reads a node's answer uses this, so the
+// framing cannot drift between the TLS and the local-socket paths.
+func ReadResult(r io.Reader) (ResultFrame, error) {
+	var head [5]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil {
+		return ResultFrame{}, fmt.Errorf("deepscan: read result header: %w", err)
+	}
+	n := binary.LittleEndian.Uint32(head[1:5])
+	if n > MaxFrameBytes {
+		return ResultFrame{}, fmt.Errorf("deepscan: result declares %d bytes, over the %d cap", n, MaxFrameBytes)
+	}
+	body := make([]byte, n)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return ResultFrame{}, fmt.Errorf("deepscan: read result body: %w", err)
+	}
+	return DecodeResult(append(head[:], body...))
+}
+
+// RejectError is a node's refusal of one frame, carried as an error so a
+// delivery loop can tell "this node said no, and why" from "this node is
+// unreachable". Code is one of the Reject* constants.
+type RejectError struct{ Code string }
+
+func (e *RejectError) Error() string { return "deepscan: node rejected the frame: " + e.Code }
