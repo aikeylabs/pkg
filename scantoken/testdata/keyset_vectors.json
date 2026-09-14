@@ -1,0 +1,64 @@
+{
+  "note": "Cross-language fixture for the AIKEY_SCAN_TOKEN_KEY_FILE format. Go pkg/scantoken.ParseKeySet and Python workers/scan_token.parse_keyset must agree on every case, including the two legacy shapes that are on deployed machines today.",
+  "cases": [
+    {
+      "name": "rotated",
+      "raw": "current: k2:NEWSECRET-aaaaaaaaaaaaaaaaaaaaaa\nprevious: k1:OLDSECRET-bbbbbbbbbbbbbbbbbbbbbb\nprevious_valid_until: 1789200634\n",
+      "current_key_id": "k2",
+      "current_secret": "NEWSECRET-aaaaaaaaaaaaaaaaaaaaaa",
+      "previous_key_id": "k1",
+      "previous_secret": "OLDSECRET-bbbbbbbbbbbbbbbbbbbbbb",
+      "previous_valid_until": 1789200634
+    },
+    {
+      "name": "current only (rotated once, grace already reaped)",
+      "raw": "current: k3:ONLYSECRET-cccccccccccccccccccc\n",
+      "current_key_id": "k3",
+      "current_secret": "ONLYSECRET-cccccccccccccccccccc",
+      "previous_key_id": "",
+      "previous_secret": "",
+      "previous_valid_until": 0
+    },
+    {
+      "name": "legacy id:secret one-liner (pre-rotation installers)",
+      "raw": "k1:LEGACYSECRET-dddddddddddddddddd\n",
+      "current_key_id": "k1",
+      "current_secret": "LEGACYSECRET-dddddddddddddddddd",
+      "previous_key_id": "",
+      "previous_secret": "",
+      "previous_valid_until": 0
+    },
+    {
+      "name": "legacy bare secret (first installers)",
+      "raw": "BARESECRET-eeeeeeeeeeeeeeeeeeeeee\n",
+      "current_key_id": "k1",
+      "current_secret": "BARESECRET-eeeeeeeeeeeeeeeeeeeeee",
+      "previous_key_id": "",
+      "previous_secret": "",
+      "previous_valid_until": 0
+    },
+    {
+      "name": "comments and blank lines are ignored",
+      "raw": "# written by cluster-install.sh\n\ncurrent: k9:HASHSECRET-ffffffffffffffffff\n\n",
+      "current_key_id": "k9",
+      "current_secret": "HASHSECRET-ffffffffffffffffff",
+      "previous_key_id": "",
+      "previous_secret": "",
+      "previous_valid_until": 0
+    }
+  ],
+  "reject_cases": [
+    {
+      "name": "previous with no grace instant would live forever",
+      "raw": "current: k2:AAA\nprevious: k1:BBB\n"
+    },
+    {
+      "name": "empty file",
+      "raw": "\n\n"
+    },
+    {
+      "name": "unparsable previous_valid_until",
+      "raw": "current: k2:AAA\nprevious: k1:BBB\nprevious_valid_until: soon\n"
+    }
+  ]
+}
