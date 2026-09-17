@@ -85,11 +85,33 @@ const (
 )
 
 // Action codes for response payload.
+//
+// Appended, never renumbered: the value travels the pipe as a raw byte, so
+// reordering the rungs would reinterpret every verdict already in flight.
+// Pinned by TestActionCodes_AppendedNeverRenumbered.
 const (
 	ActionAllow uint8 = 0
 	ActionMask  uint8 = 1
 	ActionBlock uint8 = 2
 	ActionWarn  uint8 = 3
+	// ActionAnswer is 安全代答 (canned answer): refuse the request like
+	// ActionBlock, but let the proxy serve an administrator-authored reply
+	// instead of a 403. On this verdict Response.Findings carries the
+	// CannedAnswer JSON (the slot is free: nothing is masked, because nothing
+	// is forwarded).
+	//
+	// Why no ProtocolVersion bump: the version byte guards the BINARY layout,
+	// and the action field is the same 1 byte it has always been — appending a
+	// value changes no offset and no length. A parent that does not recognize
+	// the value must treat it as a block (aikey-proxy apphook.NormalizeAction,
+	// R-compliance-canned-answer-6), never as an allow.
+	//
+	// Why it lives here (TODO-85, 2026-09-15): until then `4` was spelled in
+	// aikey-proxy (apphook.ActionAnswer) and in ai-compliance-detector
+	// (internal/pipe) separately, held together by a fence on each side — the
+	// exact hand-copied shape this package exists to remove (see the package
+	// doc). Consumers reference this constant; they must not re-spell it.
+	ActionAnswer uint8 = 4
 )
 
 // RouteClass tells the detector where this request's compliance event should be
@@ -172,10 +194,9 @@ type Request struct {
 //
 // ReqID echoes Request.ReqID so the proxy matches each response to its request —
 // responses may return out of order once the detector processes concurrently.
-// Findings and MaskMeta are length-prefixed so the trailing Event blob (the full
-// compliance event JSON the proxy uploads to master for team-routed requests)
-// can be split out. Event is empty for personal-routed requests and non-Detect
-// ops; MaskMeta is empty unless the mask verdict carries restorable spans (v4).
+// Findings and MaskMeta are length-prefixed so the trailing Event blob can be
+// split out. MaskMeta is empty unless the mask verdict carries restorable spans
+// (v4). What Event holds depends on the route class — see the Event field.
 type Response struct {
 	ReqID    uint32 // v3: echoes Request.ReqID
 	Action   uint8
@@ -186,7 +207,25 @@ type Response struct {
 	// downstream — the proxy keeps the derived placeholder↔original mapping in
 	// per-request memory only (B3 拍板 2026-08-06).
 	MaskMeta []byte
-	Event    []byte // team-routed compliance event JSON for the proxy to forward; empty otherwise
+	// Event is a per-route-class slot (TODO-87, 2026-09-15 — this comment used
+	// to say "empty for personal-routed requests", which is no longer true):
+	//
+	//	RouteClassTeam     — the FULL compliance event JSON. The proxy stamps
+	//	                     attribution on it and uploads it to master.
+	//	RouteClassPersonal — a CountProjection JSON, and only when the org
+	//	                     grading document is non-empty and the piece has
+	//	                     findings; empty otherwise. The detector has ALREADY
+	//	                     uploaded the full event to the local self-view; the
+	//	                     projection exists only so the proxy's request-level
+	//	                     escalation counter can count this piece. The proxy
+	//	                     MUST NOT upload it anywhere.
+	//	non-Detect ops     — empty.
+	//
+	// Why no ProtocolVersion bump: the slot and its length framing are unchanged;
+	// only the JSON inside differs, and an old proxy that reads a projection
+	// decodes the same `findings` keys it already reads off a team event while
+	// its route guard keeps the bytes from ever being uploaded.
+	Event []byte
 }
 
 // MaskMeta is the JSON payload carried in Response.MaskMeta (v4). It is the
@@ -212,6 +251,77 @@ type Restorable struct {
 	// Spans are [start,end) BYTE offsets into the ORIGINAL request payload (the
 	// exact bytes the proxy sent over the pipe), ascending, non-overlapping.
 	Spans [][2]int `json:"spans"`
+}
+
+// CannedAnswer is the JSON payload Response.Findings carries when Action is
+// ActionAnswer. Field tags are the wire contract; the exact bytes are pinned
+// ONCE, in TestCannedAnswerWireBytes, and both participants use this type
+// (ai-compliance-detector encodes it, aikey-proxy decodes it).
+//
+// Why a shared type and not a mirror on each side: a hand-retyped mirror drifts
+// in a way the version byte cannot catch (the frame version guards the binary
+// layout, never the JSON field names inside a slot) — a renamed tag decodes to
+// an EMPTY text, which silently degrades a configured 代答 to a hard 403. Same
+// reasoning, and same incident history, as MaskMeta.
+//
+// 🔴 The text is administrator-authored CONTENT. It travels exactly one hop
+// (detector → proxy on the same machine) and is consumed there: it must not
+// enter the audit event uploaded to master, must not enter the ListPacks
+// report, and must not be logged — only its length.
+type CannedAnswer struct {
+	// Text is emitted to the user VERBATIM (R-compliance-canned-answer-3): no
+	// template, no substitution, no concatenation with anything the detector
+	// found. A placeholder-looking token inside it is literal text.
+	Text string `json:"answer_text"`
+	// Source names WHICH fallback tier supplied Text — `rule` / `level` /
+	// `org`, spelled identically to the detector's actionpolicy.AnswerSource
+	// and to the `events[].answer_source` event field. `none` never travels: it
+	// means no tier had a text, and such a request is a block, not an answer.
+	Source string `json:"answer_source"`
+}
+
+// CountProjection is the JSON payload Response.Event carries on a
+// PERSONAL-routed Detect (TODO-87, design a2 「计数投影」, user decision
+// 2026-09-15: an organization's cumulative escalation follows the PERSON, so a
+// member's personal-key traffic counts too).
+//
+// WHY IT EXISTS: on the personal route the detector uploads its own event to the
+// local self-view and used to hand the proxy nothing, so the proxy's
+// request-level counter — the only place a whole request exists
+// (DEC-compliance-grading-11 决定 1) — counted zero there and the org rule never
+// fired. Returning the FULL event instead was rejected: it carries the raw
+// context_snippet on that lane (the detector's mayCarryRawSnippet admits it for
+// the local self-view), which would then sit in the proxy's verdict cache and be
+// one broken route guard away from being uploaded a second time.
+//
+// 🔴 CONTENT-FREE BY CONSTRUCTION. Offsets, the tenant-defined level, the rule
+// family label and the evidence gate's verdict — nothing else. No snippet, no
+// hash, no fingerprint, no prompt_hash, no finding_id. EventID is the detector's
+// CSPRNG id of the event it ALREADY uploaded locally (not content-derived), so
+// the proxy can name that row on a local request-verdict row. Adding a field
+// here puts new data on the pipe of a route whose rule is that the proxy never
+// sees content; TestCountProjectionWireBytes pins the field count.
+//
+// Field names are the compliance intake wire's (ai-compliance-detector
+// intake.Event / intake.Finding), because the proxy reads this slot with the
+// SAME decoder it uses on a team event's findings. Both consumers pin their side
+// against this type (detector: TestCountProjection_TagsMatchIntakeFinding;
+// proxy: TestCountProjection_TagsMatchProxyFinding).
+type CountProjection struct {
+	EventID  string           `json:"event_id"`
+	Findings []CountedFinding `json:"findings"`
+}
+
+// CountedFinding is one hit of a CountProjection. Level and Confirmed are
+// POINTERS with omitempty for the same reason as on intake.Finding: absent means
+// "not graded" / "no verdict travelled", and both read as zero on the proxy — an
+// ungraded or unverified hit never helps a request escalate.
+type CountedFinding struct {
+	StartOffset int    `json:"start_offset"`
+	EndOffset   int    `json:"end_offset"`
+	Level       *int   `json:"level,omitempty"`
+	Category    string `json:"category"`
+	Confirmed   *bool  `json:"confirmed,omitempty"`
 }
 
 func EncodeRequest(req *Request) []byte {

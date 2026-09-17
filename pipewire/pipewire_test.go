@@ -3,8 +3,128 @@ package pipewire
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
+	"reflect"
 	"testing"
 )
+
+// TestActionCodes_AppendedNeverRenumbered pins every action value. The byte
+// travels the pipe unvalidated, so a renumbered or colliding rung reinterprets
+// verdicts silently rather than failing to compile.
+func TestActionCodes_AppendedNeverRenumbered(t *testing.T) {
+	want := []struct {
+		name  string
+		value uint8
+		code  uint8
+	}{
+		{"ActionAllow", 0, ActionAllow},
+		{"ActionMask", 1, ActionMask},
+		{"ActionBlock", 2, ActionBlock},
+		{"ActionWarn", 3, ActionWarn},
+		{"ActionAnswer", 4, ActionAnswer},
+	}
+	seen := map[uint8]string{}
+	for _, w := range want {
+		if w.code != w.value {
+			t.Errorf("%s = %d, want %d (appended, never renumbered)", w.name, w.code, w.value)
+		}
+		if prev, dup := seen[w.code]; dup {
+			t.Errorf("%s collides with %s on value %d", w.name, prev, w.code)
+		}
+		seen[w.code] = w.name
+	}
+}
+
+// cannedAnswerWireGolden is the EXACT byte string the detector writes into
+// Response.Findings for an ActionAnswer verdict and the proxy decodes.
+//
+// 🔴 THE ONLY BYTE LITERAL FOR THIS CONTRACT (TODO-85). It used to be pinned
+// twice — ai-compliance-detector cmd/detector/canned_answer_carrier_test.go and
+// aikey-proxy internal/apphook/canned_answer_carrier_test.go — as a stand-in for
+// the shared type this package now provides. Both consumers alias CannedAnswer
+// and assert the alias, so this one literal guards both sides.
+const cannedAnswerWireGolden = `{"answer_text":"抱歉，这条内容命中了公司合规策略，无法发送给模型。\n如需帮助请联系合规部门。占位语法示例：{{IDCARD_1}} 原样保留。","answer_source":"level"}`
+
+// TestCannedAnswerWireBytes pins the JSON contract in both directions: encoding
+// produces the agreed bytes, and the agreed bytes decode back to the fields.
+func TestCannedAnswerWireBytes(t *testing.T) {
+	text := "抱歉，这条内容命中了公司合规策略，无法发送给模型。\n" +
+		"如需帮助请联系合规部门。占位语法示例：{{IDCARD_1}} 原样保留。"
+
+	encoded, err := json.Marshal(CannedAnswer{Text: text, Source: "level"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(encoded) != cannedAnswerWireGolden {
+		t.Errorf("CannedAnswer wire bytes drifted.\n got: %s\nwant: %s\n"+
+			"A tag rename reaches the proxy as an EMPTY answer, which degrades a "+
+			"configured 代答 to a hard 403.", encoded, cannedAnswerWireGolden)
+	}
+
+	var decoded CannedAnswer
+	if err := json.Unmarshal([]byte(cannedAnswerWireGolden), &decoded); err != nil {
+		t.Fatalf("unmarshal golden: %v", err)
+	}
+	if decoded.Text != text || decoded.Source != "level" {
+		t.Errorf("golden bytes decoded to %+v, want Text=%q Source=\"level\"", decoded, text)
+	}
+}
+
+// countProjectionWireGolden is the ONLY byte literal for the CountProjection
+// contract (TODO-87). Keys, key order and the omitempty behaviour of `level` /
+// `confirmed` are all part of it: the proxy decodes this slot with the SAME
+// reader it uses on a team event's findings, so a renamed tag decodes to a zero
+// value — an uncounted hit, silently, in the permissive direction.
+const countProjectionWireGolden = `{"event_id":"0123456789abcdef0123456789abcdef","findings":[` +
+	`{"start_offset":6,"end_offset":24,"level":4,"category":"pii","confirmed":true},` +
+	`{"start_offset":30,"end_offset":41,"category":"secret"}]}`
+
+// TestCountProjectionWireBytes pins the projection JSON in both directions and
+// pins what it may NOT carry: exactly two top-level keys and exactly five
+// finding keys. Anything else on this struct is a new field crossing the pipe on
+// the personal route, and that route's rule is that the proxy never sees content.
+func TestCountProjectionWireBytes(t *testing.T) {
+	level := 4
+	confirmed := true
+	proj := CountProjection{
+		EventID: "0123456789abcdef0123456789abcdef",
+		Findings: []CountedFinding{
+			{StartOffset: 6, EndOffset: 24, Level: &level, Category: "pii", Confirmed: &confirmed},
+			{StartOffset: 30, EndOffset: 41, Category: "secret"},
+		},
+	}
+	encoded, err := json.Marshal(proj)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(encoded) != countProjectionWireGolden {
+		t.Errorf("CountProjection wire bytes drifted.\n got: %s\nwant: %s", encoded, countProjectionWireGolden)
+	}
+
+	var decoded CountProjection
+	if err := json.Unmarshal([]byte(countProjectionWireGolden), &decoded); err != nil {
+		t.Fatalf("unmarshal golden: %v", err)
+	}
+	if decoded.EventID != proj.EventID || len(decoded.Findings) != 2 ||
+		decoded.Findings[0].Level == nil || *decoded.Findings[0].Level != 4 ||
+		decoded.Findings[0].Confirmed == nil || !*decoded.Findings[0].Confirmed ||
+		decoded.Findings[1].Level != nil || decoded.Findings[1].Confirmed != nil {
+		t.Errorf("golden bytes decoded to %+v", decoded)
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &top); err != nil {
+		t.Fatalf("decode top: %v", err)
+	}
+	if len(top) != 2 {
+		t.Errorf("CountProjection carries %d top-level keys, want exactly 2 (event_id, findings): %s", len(top), encoded)
+	}
+	if n := reflect.TypeOf(CountedFinding{}).NumField(); n != 5 {
+		t.Errorf("CountedFinding has %d fields, want exactly 5 (offsets, level, category, confirmed). "+
+			"A sixth field is new data crossing the pipe on the personal route — no snippet, hash, "+
+			"fingerprint, prompt_hash or finding_id may ride here.", n)
+	}
+}
 
 func TestRoundtripFrame(t *testing.T) {
 	tests := []struct {
