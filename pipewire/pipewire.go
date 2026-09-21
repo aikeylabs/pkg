@@ -39,7 +39,9 @@ package pipewire
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +76,17 @@ import (
 // it sent). Empty for non-mask verdicts and for masks with nothing restorable.
 // Lockstep as before (proxy + detector rebuilt and shipped together; the
 // version byte fails loud on skew).
+//
+// NOT a bump (2026-09-21, TODO-188 方案 C, 用户拍板 C.7-1): OpSetGrading = 5 was
+// APPENDED to the op table. Same reasoning as ActionAnswer below: the version
+// byte guards the BINARY layout, and the op field is the same 1 byte it has
+// always been — the request and response frames are unchanged, the document
+// rides the existing Prompt slot and the ack rides the existing Findings slot.
+// A child that predates the op answers it through its `default:` arm with an
+// EMPTY Findings slot, which the proxy reads as "unsupported" and falls back to
+// the pre-C behaviour (a full generation reload). Bumping would instead make
+// every old child fail its startup handshake — turning an optional
+// optimisation into a fleet outage during a staggered upgrade.
 const ProtocolVersion byte = 4
 
 // Op codes for request payload.
@@ -82,7 +95,55 @@ const (
 	OpStatus    uint8 = 2 // query child health
 	OpClose     uint8 = 3 // graceful shutdown signal
 	OpListPacks uint8 = 4 // list currently-effective packs (built-in + pulled); response carries JSON in Findings
+	// OpSetGrading hot-swaps the org 分类分级 document in a RUNNING child
+	// (TODO-188 方案 C). Request.Prompt = the compact document bytes, exactly as
+	// the proxy would have baked them into AIKEY_COMPLIANCE_GRADING (empty =
+	// "no member", an old master). Response.Findings = GradingApplied JSON.
+	//
+	// WHY IT EXISTS: until then the document reached the child ONLY through its
+	// spawn environment, so every ladder edit re-spawned the whole detector
+	// pool (new generation first, old one drained after). On a 1.6 GB Cluster
+	// worker the doubled pool crossed the unit's MemoryHigh and the node
+	// livelocked (TODO-188 triage, 2026-09-21).
+	//
+	// 🔴 A child that cannot parse the document KEEPS the one it is enforcing
+	// and says so (parse_ok=false + the token of the document still in force) —
+	// 用户拍板 C.7-3. The proxy moves nothing (env, cache epoch, its own rules)
+	// until parse_ok=true AND the token matches the bytes it sent.
+	//
+	// Appended, never renumbered; no ProtocolVersion bump (see there).
+	// Pinned by TestOpCodes_AppendedNeverRenumbered.
+	OpSetGrading uint8 = 5
 )
+
+// GradingApplied is the JSON payload Response.Findings carries for
+// OpSetGrading. Field tags are the wire contract, pinned ONCE in
+// TestGradingAppliedWireBytes; the detector encodes this type and aikey-proxy
+// decodes it.
+//
+// GradingToken is GradingToken(document) of the document the child is
+// enforcing AFTER handling the request: the new one when ParseOK, the previous
+// one when not. It is a digest of an administrator POLICY document the proxy
+// itself sent — not a value derived from user content — so it may appear on
+// health surfaces and in logs.
+type GradingApplied struct {
+	GradingToken string `json:"grading_token"`
+	ParseOK      bool   `json:"parse_ok"`
+}
+
+// GradingToken is THE one reduction of an org grading document to a token,
+// spelled "grading:<sha256[:16]>" (design.md §4b). It hashes the EXACT bytes
+// (no trimming — canonicalisation is the proxy's normalizeGradingPolicy, done
+// once at the entry); empty input is the "no document" token.
+//
+// WHY IT LIVES HERE: the proxy uses it for the filter signature and the
+// verdict-cache epoch, the detector for the OpSetGrading ack, and the proxy
+// compares the two. Two hand-copied digests would turn any drift into "the
+// child refused every document" — the hot swap silently never landing.
+func GradingToken(doc []byte) string {
+	sum := sha256.Sum256(doc)
+	return "grading:" + hex.EncodeToString(sum[:])[:16]
+}
 
 // Action codes for response payload.
 //

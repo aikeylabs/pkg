@@ -245,3 +245,86 @@ func TestPayloadTooLarge(t *testing.T) {
 		t.Fatal("expected error for oversized payload, got nil")
 	}
 }
+
+// TestOpCodes_AppendedNeverRenumbered pins every op value. Like the action byte,
+// the op byte travels unvalidated: a renumbered op makes an old child run a
+// DIFFERENT handler on the same bytes (e.g. read a grading document as a prompt
+// to detect) instead of failing loudly. New ops are appended; a collision is a
+// compile-time-invisible wire break.
+//
+// OpSetGrading (5) is the TODO-188 方案 C append — see its comment for why it
+// did not bump ProtocolVersion.
+func TestOpCodes_AppendedNeverRenumbered(t *testing.T) {
+	want := []struct {
+		name  string
+		value uint8
+		code  uint8
+	}{
+		{"OpDetect", 1, OpDetect},
+		{"OpStatus", 2, OpStatus},
+		{"OpClose", 3, OpClose},
+		{"OpListPacks", 4, OpListPacks},
+		{"OpSetGrading", 5, OpSetGrading},
+	}
+	seen := map[uint8]string{}
+	for _, w := range want {
+		if w.code != w.value {
+			t.Errorf("%s = %d, want %d (appended, never renumbered)", w.name, w.code, w.value)
+		}
+		if prev, dup := seen[w.code]; dup {
+			t.Errorf("%s collides with %s on value %d", w.name, prev, w.code)
+		}
+		seen[w.code] = w.name
+	}
+}
+
+// gradingAppliedWireGolden is the ONLY byte literal for the OpSetGrading ack
+// (TODO-188 方案 C). The detector encodes it into Response.Findings, the proxy
+// decodes it. A renamed tag decodes to parse_ok=false / an empty token, which
+// the proxy reads as "the child refused the document" — the swap silently never
+// lands. Pinned once, here; both sides use the shared type.
+const gradingAppliedWireGolden = `{"grading_token":"grading:0123456789abcdef","parse_ok":true}`
+
+func TestGradingAppliedWireBytes(t *testing.T) {
+	encoded, err := json.Marshal(GradingApplied{GradingToken: "grading:0123456789abcdef", ParseOK: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(encoded) != gradingAppliedWireGolden {
+		t.Errorf("GradingApplied wire bytes drifted.\n got: %s\nwant: %s", encoded, gradingAppliedWireGolden)
+	}
+	var decoded GradingApplied
+	if err := json.Unmarshal([]byte(gradingAppliedWireGolden), &decoded); err != nil {
+		t.Fatalf("unmarshal golden: %v", err)
+	}
+	if decoded.GradingToken != "grading:0123456789abcdef" || !decoded.ParseOK {
+		t.Errorf("golden bytes decoded to %+v", decoded)
+	}
+	// Exactly two fields: the ack carries a digest of a POLICY document the
+	// proxy sent (not user content) and a bool. Anything more is new data on the
+	// pipe that nobody reviewed.
+	if n := reflect.TypeOf(GradingApplied{}).NumField(); n != 2 {
+		t.Errorf("GradingApplied has %d fields, want exactly 2 (grading_token, parse_ok)", n)
+	}
+}
+
+// TestGradingToken_OneDigestBothSides pins the spelling "grading:<sha256[:16]>"
+// (design.md §4b) and the input it hashes: the EXACT bytes, no trimming, empty
+// input = "no document". The proxy's filter signature / cache epoch and the
+// detector's ack both call this one function, so a token mismatch can only mean
+// the child applied different bytes, never that two hand-copied digests drifted.
+func TestGradingToken_OneDigestBothSides(t *testing.T) {
+	// sha256("") = e3b0c44298fc1c14...
+	if got := GradingToken(nil); got != "grading:e3b0c44298fc1c14" {
+		t.Errorf("GradingToken(nil) = %q, want grading:e3b0c44298fc1c14", got)
+	}
+	if GradingToken(nil) != GradingToken([]byte{}) {
+		t.Error("nil and empty must be the same document (absent)")
+	}
+	if GradingToken([]byte(`{}`)) == GradingToken(nil) {
+		t.Error("`{}` and absent must hash differently (TODO-61: two states)")
+	}
+	if GradingToken([]byte(` {}`)) == GradingToken([]byte(`{}`)) {
+		t.Error("the digest is over the exact bytes; normalisation belongs to the proxy's single entry point")
+	}
+}
