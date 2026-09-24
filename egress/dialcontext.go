@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/net/http/httpproxy"
@@ -39,10 +40,7 @@ func BuildDialContext(spec string) (DialContextFunc, io.Closer, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	var closer io.Closer
-	if c, ok := d.(io.Closer); ok {
-		closer = c
-	}
+	closer := dialerCloser(d)
 	dial := dialerDialContext(d)
 	bypass := noProxyBypass()
 	// Mirror the data plane's direct-dial parameters (proxy.dialerToTransport)
@@ -54,6 +52,78 @@ func BuildDialContext(spec string) (DialContextFunc, io.Closer, error) {
 		}
 		return dial(ctx, network, addr)
 	}, closer, nil
+}
+
+// BuildEgressOnlyDialContext builds spec through the engine registry and
+// returns a dial function that ALWAYS rides the egress: unlike BuildDialContext
+// there is no NO_PROXY and no loopback direct-dial bypass. It also returns the
+// built dialer itself, so the caller can ask it (EgressBypassesHost) whether a
+// fragment's own rules would route a destination DIRECT — the one bypass this
+// function cannot remove, because it runs inside the engine.
+//
+// Why a second builder (DEC-master-central-login-13, 2026-09-24): master-side
+// administrator login must leave through the selected egress even when the
+// master process's NO_PROXY names a provider host. NO_PROXY exists for
+// internal destinations (2026-07-16 option ②); a provider endpoint is not one,
+// and silently going direct would sign the account in from master's own IP
+// while the audit still says "pool egress". BuildDialContext keeps its bypass
+// for every other caller (member Session Key, renewal, the data plane).
+//
+// Why the dialer is returned (Ruling-9): the caller needs BypassInfo on the SAME
+// dialer it dials with. Building a second one to ask would pay a group-backed
+// fragment's synchronous health-check warm-up twice (up to ~5s each, not
+// cancellable) inside a 22-second login budget.
+//
+// The closer contract is BuildDialContext's: non-nil for group-backed dialers,
+// and it MUST be closed when the caller is done.
+func BuildEgressOnlyDialContext(spec string) (DialContextFunc, xproxy.Dialer, io.Closer, error) {
+	d, err := BuildDialer(spec)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return dialerDialContext(d), d, dialerCloser(d), nil
+}
+
+// EgressBypassesHost reports whether dialer d would route host DIRECT because
+// of its own rules (a mihomo fragment's `rules:` DIRECT exception), and which
+// rule decided it. A dialer without rules (built-in socks5 chain, rule-less
+// fragment) never bypasses, so the answer is false.
+//
+// host may be a bare host or host:port; a bare host is asked about port 443
+// (fragment rules match on the destination host, never the port).
+func EgressBypassesHost(d xproxy.Dialer, host string) (bool, string) {
+	reporter, ok := d.(BypassReporter)
+	if !ok {
+		return false, ""
+	}
+	addr := host
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		addr = net.JoinHostPort(strings.Trim(host, "[]"), "443")
+	}
+	return reporter.BypassInfo(addr)
+}
+
+// NoProxyBypasses reports whether BuildDialContext would dial host direct:
+// loopback, or a NO_PROXY / no_proxy match (suffix or CIDR). It is the SAME
+// predicate BuildDialContext applies (noProxyBypass), read from the process
+// environment at call time — never a second matcher that could drift.
+//
+// Administrator login uses it to REPORT (not to honour) a provider host that
+// NO_PROXY would have sent direct: the login rides the egress anyway and the
+// caller logs one WARN naming the host (DEC-master-central-login-13).
+//
+// host is a bare host or IP literal, as net.SplitHostPort yields it.
+func NoProxyBypasses(host string) bool {
+	return noProxyBypass()(host)
+}
+
+// dialerCloser returns d as an io.Closer when it holds background resources
+// (group health checks), nil otherwise.
+func dialerCloser(d xproxy.Dialer) io.Closer {
+	if c, ok := d.(io.Closer); ok {
+		return c
+	}
+	return nil
 }
 
 func dialerDialContext(d xproxy.Dialer) DialContextFunc {

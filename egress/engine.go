@@ -190,17 +190,21 @@ func ValidateSpec(spec string) error {
 		if part == "" {
 			continue
 		}
+		hops++
+		// A hop is named by its number and by RedactSpec, never by its raw
+		// text: the text holds the proxy credentials, and this error is shown
+		// on the Nodes page and the settings pages that save it.
+		// bugfix: workflow/CI/bugfix/2026-09-24-egress-credentials-echoed-in-errors.md
 		u, err := url.Parse(part)
 		if err != nil {
-			return fmt.Errorf("not a valid URL: %s", part)
+			return fmt.Errorf("egress chain hop %d: invalid proxy url %q: %w", hops, RedactSpec(part), ErrUnparseableProxyURL)
 		}
 		if u.Scheme != "socks5" {
-			return fmt.Errorf("each hop must be socks5 (e.g. socks5://host:1080, or socks5://front:1080,socks5://exit:1080): %s", part)
+			return fmt.Errorf("egress chain hop %d: each hop must be socks5 (e.g. socks5://host:1080, or socks5://front:1080,socks5://exit:1080): %s", hops, RedactSpec(part))
 		}
 		if u.Host == "" {
-			return fmt.Errorf("hop missing host:port: %s", part)
+			return fmt.Errorf("egress chain hop %d: missing host:port: %s", hops, RedactSpec(part))
 		}
-		hops++
 	}
 	if hops == 0 {
 		return fmt.Errorf("empty chain")

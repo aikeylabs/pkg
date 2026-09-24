@@ -20,6 +20,7 @@
 package egress
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -99,7 +100,10 @@ func parseEgressChain(spec string) ([]egressHop, error) {
 		}
 		addr, auth, err := parseSocks5URL(raw)
 		if err != nil {
-			return nil, err
+			// The hop number is what still locates a hop whose address cannot be
+			// shown (RedactSpec renders it "(unparseable)"). Numbered like
+			// buildSocks5Chain's errors. DEC-master-central-login-15.
+			return nil, fmt.Errorf("egress chain hop %d: %w", len(hops)+1, err)
 		}
 		hops = append(hops, egressHop{addr: addr, auth: auth})
 	}
@@ -111,16 +115,24 @@ func parseEgressChain(spec string) ([]egressHop, error) {
 
 // parseSocks5URL validates a socks5 proxy URL and splits it into (host:port,
 // optional auth). socks5h (DNS via proxy) is intentionally not accepted yet.
+//
+// Its errors name the address only as RedactSpec renders it and never wrap
+// url.Parse's error: the raw URL holds the proxy credentials, a *url.Error
+// quotes it whole, and the parser's inner reason can quote the password too.
+// These errors reach the administrator's Session Key dialog, the Test egress
+// results, `aikey doctor` and the Worker's ERROR log.
+// bugfix: workflow/CI/bugfix/2026-09-24-egress-credentials-echoed-in-errors.md
 func parseSocks5URL(raw string) (addr string, auth *xproxy.Auth, err error) {
+	shown := RedactSpec(raw)
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", nil, fmt.Errorf("invalid proxy url %q: %w", raw, err)
+		return "", nil, fmt.Errorf("invalid proxy url %q: %w", shown, ErrUnparseableProxyURL)
 	}
 	if u.Scheme != "socks5" {
 		return "", nil, fmt.Errorf("unsupported proxy scheme %q (only socks5 in the built-in engine)", u.Scheme)
 	}
 	if u.Host == "" {
-		return "", nil, fmt.Errorf("proxy url %q has no host", raw)
+		return "", nil, fmt.Errorf("proxy url %q has no host", shown)
 	}
 	// 🔴 A non-empty Host is NOT the same as a dialable one (found 2026-07-31 by
 	// the fence in aikey-proxy/app/transport_strict_test.go, which had been failing
@@ -135,16 +147,17 @@ func parseSocks5URL(raw string) (addr string, auth *xproxy.Auth, err error) {
 	// net.SplitHostPort cannot split is one net.Dial could never have dialed.
 	host, port, splitErr := net.SplitHostPort(u.Host)
 	if splitErr != nil {
-		return "", nil, fmt.Errorf("proxy url %q is not a dialable host:port: %w", raw, splitErr)
+		return "", nil, fmt.Errorf("proxy url %q is not a dialable host:port: %s", shown, hostPortProblem(splitErr))
 	}
 	if host == "" {
-		return "", nil, fmt.Errorf("proxy url %q has no host", raw)
+		return "", nil, fmt.Errorf("proxy url %q has no host", shown)
 	}
 	// A named port ("socks5://h:proxy") is rejected on purpose: it would resolve
 	// via /etc/services on some hosts and not others, so the same spec would work
 	// on one node and fail on the next.
 	if p, perr := strconv.Atoi(port); perr != nil || p < 1 || p > 65535 {
-		return "", nil, fmt.Errorf("proxy url %q has an invalid port %q (want 1-65535)", raw, port)
+		// port is digits only here: url.Parse already refused any other port.
+		return "", nil, fmt.Errorf("proxy url %q has an invalid port %q (want 1-65535)", shown, port)
 	}
 	if pw, ok := u.User.Password(); ok {
 		auth = &xproxy.Auth{User: u.User.Username(), Password: pw}
@@ -152,4 +165,15 @@ func parseSocks5URL(raw string) (addr string, auth *xproxy.Auth, err error) {
 		auth = &xproxy.Auth{User: u.User.Username()}
 	}
 	return u.Host, auth, nil
+}
+
+// hostPortProblem is net.SplitHostPort's reason ("missing port in address")
+// without the address it quotes: that address is url.Parse's reading of the
+// host, which for a mistyped URL can be part of the credentials.
+func hostPortProblem(err error) string {
+	var addrErr *net.AddrError
+	if errors.As(err, &addrErr) {
+		return addrErr.Err
+	}
+	return "it cannot be split into host and port"
 }
