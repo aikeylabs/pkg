@@ -158,7 +158,9 @@ func singleHTTPProxyURL(spec string) (*url.URL, bool, error) {
 		return nil, false, nil
 	}
 	u, err := url.Parse(spec)
-	if err != nil {
+	// D3 甲: an unescaped '/' in the credentials would send the probe to the
+	// wrong proxy host (review-2.4 I-3).
+	if err != nil || pathHoldsUserinfo(u) {
 		return nil, true, fmt.Errorf("invalid http-proxy egress %q: %w", RedactSpec(spec), ErrUnparseableProxyURL)
 	}
 	if u.Hostname() == "" {

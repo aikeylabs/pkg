@@ -196,7 +196,9 @@ func ValidateSpec(spec string) error {
 		// on the Nodes page and the settings pages that save it.
 		// bugfix: workflow/CI/bugfix/2026-09-24-egress-credentials-echoed-in-errors.md
 		u, err := url.Parse(part)
-		if err != nil {
+		// D3 甲: refused at save time too (DEC-15: "在保存与使用时都被拒绝"),
+		// the same verdict parseSocks5URL gives at build time.
+		if err != nil || pathHoldsUserinfo(u) {
 			return fmt.Errorf("egress chain hop %d: invalid proxy url %q: %w", hops, RedactSpec(part), ErrUnparseableProxyURL)
 		}
 		if u.Scheme != "socks5" {

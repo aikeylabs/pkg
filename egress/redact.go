@@ -19,10 +19,11 @@ const (
 //   - a hop that does not start with a well-formed "scheme://" becomes
 //     "(unparseable)": with no URL shape there is no userinfo to cut, and the
 //     text may be a stray piece of a fragment;
-//   - a hop with no '@' whose host is followed by something other than a port
-//     number also becomes "(unparseable)": "http://user:password" typed
-//     without its "@host" looks exactly like that, and the password is the
-//     part that would be shown;
+//   - a hop whose host is followed by something other than a port number also
+//     becomes "(unparseable)", with or without an '@': "http://user:password"
+//     typed without its "@host" looks exactly like that, and so does the part
+//     after the '@' of "host:port@user:password" written backwards — the
+//     password is the part that would be shown (D2 甲, review-2.4 I-2);
 //   - a config fragment becomes "(multi-protocol config fragment)" — its own
 //     fields carry passwords, so none of its text is shown;
 //   - an empty spec stays empty.
@@ -73,17 +74,21 @@ func redactHop(hop string) string {
 	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
 		rest = rest[:end]
 	}
-	if at < 0 && mayBeUserPassword(rest) {
+	if mayBeUserPassword(rest) {
 		return redactedUnparseable
 	}
 	return scheme + "://" + rest
 }
 
-// mayBeUserPassword reports whether an authority typed WITHOUT an '@' could
-// be "user:password" missing its "@host": a name, a ':', then something that is
-// not a port number. An address that really has a bad port looks the same, so
-// both are hidden. An IP literal ("[...") is shown: a user name cannot start
-// with '[' (RFC 3986 §3.2.1 does not allow it in userinfo).
+// mayBeUserPassword reports whether the text shown as host:port could be
+// "user:password": a name, a ':', then something that is not a port number.
+// Without an '@' it is credentials typed without their "@host"; after the last
+// '@' it is the back half of "host:port@user:password" written backwards. An
+// address that really has a bad port looks the same, so all of them are hidden
+// (D2 甲, 2026-09-24: safety before locating; the hop number and the shared
+// hint still say which hop and what to check). An IP literal ("[...") is shown:
+// a user name cannot start with '[' (RFC 3986 §3.2.1 does not allow it in
+// userinfo).
 func mayBeUserPassword(authority string) bool {
 	if strings.HasPrefix(authority, "[") {
 		return false

@@ -125,7 +125,9 @@ func parseEgressChain(spec string) ([]egressHop, error) {
 func parseSocks5URL(raw string) (addr string, auth *xproxy.Auth, err error) {
 	shown := RedactSpec(raw)
 	u, err := url.Parse(raw)
-	if err != nil {
+	// D3 甲: a path holding '@' means an unescaped '/' in the credentials cut
+	// the authority short — the host url.Parse found is not the one typed.
+	if err != nil || pathHoldsUserinfo(u) {
 		return "", nil, fmt.Errorf("invalid proxy url %q: %w", shown, ErrUnparseableProxyURL)
 	}
 	if u.Scheme != "socks5" {

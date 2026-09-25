@@ -64,10 +64,12 @@ var credentialEchoCases = []echoCase{
 		build: []string{`"socks5://portless.example.test"`, "not a dialable host:port", "missing port"},
 	},
 	{
+		// D2 甲: a port that is not a number shows the hop number and the shared
+		// hint only, never host:port (the part after '@' may be credentials).
 		name:     "single socks5 with a port that is not a number",
 		spec:     "socks5://" + markUser + ":" + markPass + "@proxy.example.test:abc",
-		build:    []string{`"socks5://proxy.example.test:abc"`},
-		validate: []string{"socks5://proxy.example.test:abc", "not a valid URL"},
+		build:    []string{"hop 1", `"(unparseable)"`},
+		validate: []string{"hop 1", "(unparseable)", "not a valid URL"},
 	},
 	{
 		name:  "single socks5 with port 0",
@@ -92,8 +94,37 @@ var credentialEchoCases = []echoCase{
 	{
 		name:     "chain whose second hop has a port that is not a number",
 		spec:     "socks5://front.example.test:1080,socks5://" + markUser + ":" + markPass + "@exit.example.test:abc",
-		build:    []string{"hop 2", `"socks5://exit.example.test:abc"`},
-		validate: []string{"hop 2", "socks5://exit.example.test:abc", "not a valid URL"},
+		build:    []string{"hop 2", `"(unparseable)"`},
+		validate: []string{"hop 2", "(unparseable)", "not a valid URL"},
+	},
+	{
+		// D2 甲 (review-2.4 I-2): written backwards, the part after the last '@'
+		// is the user name and password.
+		name:     "written backwards: host:port@user:password",
+		spec:     "socks5://proxy.example.test:1080@" + markUser + ":" + markPass,
+		build:    []string{"hop 1", `"(unparseable)"`},
+		validate: []string{"hop 1", "(unparseable)"},
+	},
+	{
+		name:     "chain whose second hop is written backwards",
+		spec:     "socks5://front.example.test:1080,socks5://exit.example.test:1080@" + markUser + ":" + markPass,
+		build:    []string{"hop 2", `"(unparseable)"`},
+		validate: []string{"hop 2", "(unparseable)"},
+	},
+	{
+		// D3 甲 (review-2.4 I-3): an unescaped '/' in the password, with digits
+		// before it, parses cleanly into the wrong host ("u-MARK7:12") and a path
+		// holding the rest. Refused at build and at save, pointing at %2F.
+		name:     "unescaped slash in the password, digits before it",
+		spec:     "socks5://" + markUser + ":12/" + markPass + "@proxy.example.test:1080",
+		build:    []string{"hop 1", "%2F"},
+		validate: []string{"hop 1", "%2F"},
+	},
+	{
+		name:     "chain whose second hop has an unescaped slash in the password",
+		spec:     "socks5://front.example.test:1080,socks5://" + markUser + ":12/" + markPass + "@exit.example.test:1080",
+		build:    []string{"hop 2", "%2F"},
+		validate: []string{"hop 2", "%2F"},
 	},
 	{
 		name:     "chain whose second hop has no host",
@@ -118,15 +149,15 @@ var credentialEchoCases = []echoCase{
 		validate: []string{"socks5://proxy.example.test:1080", "not a valid URL"},
 	},
 	{
-		// url.Parse ends the authority at the first '/', reads the USER NAME as
+		// url.Parse ends the authority at the first '?', reads the USER NAME as
 		// the host ("u-MARK7"), and net.SplitHostPort then quotes that host:
 		// "address u-MARK7: missing port in address". hostPortProblem keeps the
 		// reason only; this row is what makes it load-bearing (review-2.4 m-1:
 		// mutation MD, re-wrapping splitErr with %w, survived every fence).
-		// If review-2.4 D3 is adopted, this input is refused earlier and the
-		// row guards that branch instead.
-		name:  "user name followed by a slash",
-		spec:  "socks5://" + markUser + "/" + markPass + "@proxy.example.test:1080",
+		// The '/' form of this input is now refused earlier by the D3 check
+		// (path holds '@'); a '?' leaves the path empty, so it still gets here.
+		name:  "user name followed by a question mark",
+		spec:  "socks5://" + markUser + "?" + markPass + "@proxy.example.test:1080",
 		build: []string{"not a dialable host:port", "missing port"},
 	},
 	{
@@ -136,10 +167,12 @@ var credentialEchoCases = []echoCase{
 		validate: []string{"socks5://proxy.example.test:1080", "not a valid URL"},
 	},
 	{
+		// The trailing control character makes the port "1080\x7f", which is not
+		// a number, so D2 甲 hides the hop too.
 		name:     "unparseable: a control character",
 		spec:     "socks5://" + markUser + ":" + markPass + "@proxy.example.test:1080\x7f",
-		build:    []string{"proxy.example.test:1080"},
-		validate: []string{"proxy.example.test:1080", "not a valid URL"},
+		build:    []string{"hop 1", `"(unparseable)"`},
+		validate: []string{"hop 1", "(unparseable)", "not a valid URL"},
 	},
 }
 
@@ -212,7 +245,8 @@ func TestParseErrors_NeverEchoProxyCredentials(t *testing.T) {
 func TestUnparseableProxyURL_WrapsTheOneSentinel(t *testing.T) {
 	// review-2.4 m-3: a bad HOST (a space, an open IPv6 bracket) fails the same
 	// way as a bad port, so the hint must not send the user to the port only.
-	for _, word := range []string{"host", "port", "percent-encode"} {
+	// D3 甲: the '/'-in-credentials fix (%2F) is part of the same one hint.
+	for _, word := range []string{"host", "port", "percent-encode", "%2F"} {
 		if !strings.Contains(ErrUnparseableProxyURL.Error(), word) {
 			t.Errorf("the hint %q does not mention %q", ErrUnparseableProxyURL, word)
 		}
@@ -234,6 +268,19 @@ func TestUnparseableProxyURL_WrapsTheOneSentinel(t *testing.T) {
 	if !errors.Is(err, ErrUnparseableProxyURL) {
 		t.Errorf("TestDial through an http proxy URL that does not parse = %v, want it to wrap ErrUnparseableProxyURL", err)
 	}
+}
+
+// D3 甲 through TestDial's single http(s) branch (task 2.0): an unescaped '/'
+// in the password used to parse into the wrong proxy host ("u-MARK7:12") and
+// get dialed; it is refused before any dial, pointing at %2F.
+func TestTestDial_HTTPProxyWithUnescapedSlashIsRefused(t *testing.T) {
+	spec := "http://" + markUser + ":12/" + markPass + "@proxy.example.test:3128"
+	_, err := TestDial(context.Background(), spec, "http://echo.invalid/", 2*time.Second)
+	if !errors.Is(err, ErrUnparseableProxyURL) {
+		t.Fatalf("TestDial(%s) = %v, want it refused with ErrUnparseableProxyURL", RedactSpec(spec), err)
+	}
+	assertNoCredentials(t, "TestDial", err.Error())
+	assertMentions(t, "TestDial", err.Error(), []string{"http-proxy", "%2F", "http://proxy.example.test:3128"})
 }
 
 // A well-formed address that only fails to connect keeps its existing error

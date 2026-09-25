@@ -21,7 +21,12 @@ func TestRedactSpec(t *testing.T) {
 		{"surrounding blanks", "  socks5://" + markUser + ":" + markPass + "@proxy.example.test:1080  ", "socks5://proxy.example.test:1080"},
 		{"upper-case scheme kept as typed", "SOCKS5://" + markUser + ":" + markPass + "@proxy.example.test:1080", "SOCKS5://proxy.example.test:1080"},
 		{"no port", "socks5://" + markUser + ":" + markPass + "@portless.example.test", "socks5://portless.example.test"},
-		{"port not a number", "socks5://" + markUser + ":" + markPass + "@proxy.example.test:abc", "socks5://proxy.example.test:abc"},
+		// D2 甲 (2026-09-24): a port that is not a number hides the hop even after
+		// an '@' — written backwards as host:port@user:password, the part after the
+		// last '@' IS the user name and password (review-2.4 I-2).
+		{"port not a number", "socks5://" + markUser + ":" + markPass + "@proxy.example.test:abc", "(unparseable)"},
+		{"written backwards: host:port@user:password", "socks5://proxy.example.test:1080@" + markUser + ":" + markPass, "(unparseable)"},
+		{"written backwards, http", "http://proxy.example.test:3128@" + markUser + ":" + markPass, "(unparseable)"},
 		{"IPv6 host", "socks5://" + markUser + ":" + markPass + "@[2001:db8::1]:1080", "socks5://[2001:db8::1]:1080"},
 		{"IPv6 bracket left open", "socks5://" + markUser + ":" + markPass + "@[2001:db8::1:1080", "socks5://[2001:db8::1:1080"},
 		// Userinfo ends at the LAST '@', so a password holding '@', '/', '?' or

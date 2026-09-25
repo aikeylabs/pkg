@@ -69,6 +69,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/AiKeyLabs/pkg/egress"
 )
 
 // override holds the parsed control-plane proxy URL, or nil for direct.
@@ -98,14 +100,21 @@ func SetProxyOverride(rawURL string) error {
 		// 🔴 NEVER embed the raw spec (or url.Error, which carries it) in the
 		// message: a proxy URL legitimately holds credentials
 		// (http://user:pass@host:3128), and this error is logged by every
-		// caller on a failed boot. Report only the parser's reason, which
-		// describes the syntax problem without quoting the input.
-		reason := "not a valid URL"
-		var uerr *url.Error
-		if errors.As(err, &uerr) && uerr.Err != nil {
-			reason = uerr.Err.Error()
-		}
-		return fmt.Errorf("%w: %s", ErrInvalidProxyURL, reason)
+		// caller on a failed boot. Not the parser's inner reason either: it can
+		// quote the password (`invalid port ":<password>" after host` when the
+		// password holds a '/'). The shared reason says what to check; callers
+		// name the address themselves through Redact (2026-09-24 user decision
+		// A, DEC-master-central-login-15).
+		// bugfix: workflow/CI/bugfix/2026-09-24-egress-credentials-echoed-in-errors.md
+		return fmt.Errorf("%w: %w", ErrInvalidProxyURL, egress.ErrUnparseableProxyURL)
+	}
+	// D3 甲 (2026-09-24, tasks 2.4 收尾 b, Ruling-37): a path holding '@' means
+	// an unescaped '/' in the user name or password ended the authority early,
+	// so url.Parse found the wrong proxy host ("user:12") and every
+	// control-plane call would go there. Refused with the same shared reason,
+	// which says to write '/' as %2F; the previous override stays.
+	if strings.Contains(u.Path, "@") {
+		return fmt.Errorf("%w: %w", ErrInvalidProxyURL, egress.ErrUnparseableProxyURL)
 	}
 	switch u.Scheme {
 	case "http", "https", "socks5":
@@ -119,30 +128,33 @@ func SetProxyOverride(rawURL string) error {
 	return nil
 }
 
-// Redact renders a proxy spec safe to log: credentials are replaced, and an
-// unparseable spec degrades to a fixed placeholder rather than echoing input.
+// Redact renders a proxy spec safe to log: the user name and the password are
+// removed, and an unparseable spec degrades to a fixed placeholder rather than
+// echoing input.
 //
 // Callers that report a REJECTED spec must use this. The rejected path is
 // exactly where the raw value is most tempting to print ("show the operator
 // what they typed") and most dangerous to print (it was typed wrong, but the
 // password in it is usually right).
+//
+// It is egress.RedactSpec, the one way to name a proxy address in an error or
+// a log line (DEC-master-central-login-15). It used to be url.Redacted, which
+// hides the password and keeps the user name; the user decided on 2026-09-24
+// (A 甲) to hide both, and to keep one implementation.
+// bugfix: workflow/CI/bugfix/2026-09-24-egress-credentials-echoed-in-errors.md
 func Redact(rawURL string) string {
-	s := strings.TrimSpace(rawURL)
-	if s == "" {
-		return ""
-	}
-	u, err := url.Parse(s)
-	if err != nil || u.Host == "" {
-		return "(unparseable)"
-	}
-	return u.Redacted()
+	return egress.RedactSpec(rawURL)
 }
 
 // ProxyOverride reports the configured control-plane proxy, or "" when
 // control-plane traffic goes direct. For diagnostics / status endpoints.
+//
+// aikey-proxy writes this into its INFO log on every start, so it hides the
+// user name as well as the password (2026-09-24 user decision B, through
+// egress.RedactSpec like Redact above).
 func ProxyOverride() string {
 	if u := override.Load(); u != nil {
-		return u.Redacted()
+		return egress.RedactSpec(u.String())
 	}
 	return ""
 }

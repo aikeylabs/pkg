@@ -1,10 +1,14 @@
 package httpdirect
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/AiKeyLabs/pkg/egress"
 )
 
 // The core invariant: a control-plane client never routes through the env
@@ -156,7 +160,10 @@ func TestSetProxyOverride_ErrorNeverLeaksCredentials(t *testing.T) {
 func TestRedact(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"", ""},
-		{"http://user:hunter2@10.0.0.5:3128", "http://user:xxxxx@10.0.0.5:3128"},
+		// 2026-09-24 user decision A 甲 (DEC-master-central-login-15): the user
+		// name is hidden with the password. This row used to pin
+		// "http://user:xxxxx@10.0.0.5:3128" (url.Redacted keeps the user name).
+		{"http://user:hunter2@10.0.0.5:3128", "http://10.0.0.5:3128"},
 		{"socks5://10.0.0.5:1080", "socks5://10.0.0.5:1080"},
 		{"ht tp://user:hunter2@x", "(unparseable)"},
 		{"nonsense", "(unparseable)"},
@@ -167,5 +174,65 @@ func TestRedact(t *testing.T) {
 		if tc.in != "" && contains(Redact(tc.in), "hunter2") {
 			t.Errorf("Redact(%q) leaked the password", tc.in)
 		}
+	}
+}
+
+// B 盖 (2026-09-24, DEC-master-central-login-15): ProxyOverride is what
+// aikey-proxy writes into its INFO log on every start; it hides the user name
+// as well as the password. 能红: return u.Redacted() again and the user name
+// appears.
+func TestProxyOverride_HidesUserNameToo(t *testing.T) {
+	t.Cleanup(func() { _ = SetProxyOverride("") })
+	if err := SetProxyOverride("http://u-MARK7:p-MARK7@10.0.0.5:3128"); err != nil {
+		t.Fatal(err)
+	}
+	got := ProxyOverride()
+	if strings.Contains(got, "u-MARK7") || strings.Contains(got, "p-MARK7") {
+		t.Fatalf("ProxyOverride() leaked a credential: %q", got)
+	}
+	if got != "http://10.0.0.5:3128" {
+		t.Fatalf("ProxyOverride() = %q, want http://10.0.0.5:3128", got)
+	}
+}
+
+// A 甲: a spec that does not parse is reported with the one shared reason,
+// never the parser's own. Its inner reason can quote the password: an
+// unescaped '/' in it makes url.Parse say `invalid port ":<password>" after
+// host`. 能红: put the `uerr.Err.Error()` reason back.
+func TestSetProxyOverride_UnparseableGivesTheSharedReason(t *testing.T) {
+	t.Cleanup(func() { _ = SetProxyOverride("") })
+	err := SetProxyOverride("http://u-MARK7:p-MARK7/x@10.0.0.5:3128")
+	if err == nil {
+		t.Fatal("an unparseable control-plane proxy was accepted")
+	}
+	if strings.Contains(err.Error(), "u-MARK7") || strings.Contains(err.Error(), "p-MARK7") {
+		t.Fatalf("the error leaked a credential: %v", err)
+	}
+	if !errors.Is(err, ErrInvalidProxyURL) || !errors.Is(err, egress.ErrUnparseableProxyURL) {
+		t.Fatalf("error %q should wrap ErrInvalidProxyURL and egress.ErrUnparseableProxyURL", err)
+	}
+}
+
+// D3 甲 (2026-09-24, tasks 2.4 收尾 b, Ruling-37): an unescaped '/' in the
+// password, digits before it, parses into the wrong proxy host ("u-MARK7:12");
+// every control-plane call would go there. Refused like a spec that does not
+// parse, pointing at %2F, and the previous override is kept.
+func TestSetProxyOverride_RefusesUnescapedSlashInUserinfo(t *testing.T) {
+	t.Cleanup(func() { _ = SetProxyOverride("") })
+	if err := SetProxyOverride("http://10.0.0.5:3128"); err != nil {
+		t.Fatal(err)
+	}
+	err := SetProxyOverride("http://u-MARK7:12/p-MARK7@10.0.0.9:3128")
+	if err == nil {
+		t.Fatalf("a proxy URL read as host %q was accepted", "u-MARK7:12")
+	}
+	if !errors.Is(err, ErrInvalidProxyURL) || !errors.Is(err, egress.ErrUnparseableProxyURL) || !strings.Contains(err.Error(), "%2F") {
+		t.Fatalf("error %q should wrap both reasons and say to write '/' as %%2F", err)
+	}
+	if strings.Contains(err.Error(), "u-MARK7") || strings.Contains(err.Error(), "p-MARK7") {
+		t.Fatalf("the error leaked a credential: %v", err)
+	}
+	if got := ProxyOverride(); got != "http://10.0.0.5:3128" {
+		t.Fatalf("a refused spec changed the override to %q", got)
 	}
 }
